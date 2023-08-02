@@ -50,21 +50,29 @@
 
 ;;; Code:
 
-(provide 'gpt-commit)
-
 (require 'magit)
 (require 'request)
 
-(defvar gpt-commit-openai-key nil "API key for the OpenAI.")
-(defvar gpt-commit-model-name "gpt-3.5-turbo"
-  "Model name to use for GPT chat completions.")
+(defcustom gpt-commit-model-name "gpt-3.5-turbo"
+  "Model name to use for GPT chat completions."
+  :group 'gpt-commit
+  :type 'string)
 
-(defconst gpt-commit-api-url "https://api.openai.com/v1/chat/completions"
-  "API endpoint for GPT chat completions.")
+(defcustom gpt-commit-api-url "https://api.openai.com/v1/chat/completions"
+  "API endpoint for GPT chat completions."
+  :group 'gpt-commit
+  :type 'string)
+
+(defcustom gpt-commit-openai-key ""
+  "API key for the OpenAI.
+Can also be a function of no arguments that returns an API key (more secure)."
+  :group 'gpt-commit
+  :type '(radio
+          (string :tag "API key")
+          (function :tag "Function that returns the API key")))
 
 
-(defconst gpt-commit-system-prompt-en
-  "The user provides the result of running `git diff --cached`. You suggest a conventional commit message. Don't add anything else to the response. The following describes conventional commits.
+(defcustom gpt-commit-system-prompt-en "The user provides the result of running `git diff --cached`. You suggest a conventional commit message. Don't add anything else to the response. The following describes conventional commits.
 
 # Conventional Commits 1.0.0
 
@@ -104,7 +112,10 @@ A BREAKING CHANGE can be part of commits of any _type_.
 
 Additional types are not mandated by the Conventional Commits specification, and have no implicit effect in Semantic Versioning (unless they include a BREAKING CHANGE).
 <br /><br />
-A scope may be provided to a commit's type, to provide additional contextual information and is contained within parenthesis, e.g., `feat(parser): add ability to parse arrays`.")
+A scope may be provided to a commit's type, to provide additional contextual information and is contained within parenthesis, e.g., `feat(parser): add ability to parse arrays`."
+  "Prompt (directive) for ChatGPT to generate commit message."
+  :type 'string
+  :group 'gpt-commit)
 
 (defun gpt-commit-parse-response (data)
   "Parse the GPT response DATA."
@@ -116,25 +127,30 @@ A scope may be provided to a commit's type, to provide additional contextual inf
 
 (defun gpt-commit-openai-chat-completions-api (messages callback)
   "Call OpenAI's Chat Completions API with MESSAGES and CALLBACK."
-  (let* ((headers `(("Content-Type" . "application/json")
-                    ("Authorization" . ,(concat "Bearer " gpt-commit-openai-key))))
+  (let* ((headers
+          `(("Content-Type" . "application/json")
+            ("Authorization" . ,(concat "Bearer " (if (functionp
+                                                       'gpt-commit-openai-key)
+                                                      (funcall
+                                                       gpt-commit-openai-key)
+                                                    gpt-commit-openai-key)))))
          (json-string (json-serialize `((model . ,gpt-commit-model-name)
                                         (messages . ,messages))))
          (payload (encode-coding-string json-string 'utf-8)))
     (request gpt-commit-api-url
-             :type "POST"
-             :headers headers
-             :data payload
-             :parser 'json-read
-             :timeout 10
-             :success
-             (cl-function
-              (lambda (&key data &allow-other-keys)
-                (funcall callback (gpt-commit-parse-response data))))
-             :error
-             (cl-function
-              (lambda (&rest args &key data error-thrown &allow-other-keys)
-                (message "Error: %s %s" error-thrown data))))))
+      :type "POST"
+      :headers headers
+      :data payload
+      :parser 'json-read
+      :timeout 10
+      :success
+      (cl-function
+       (lambda (&key data &allow-other-keys)
+         (funcall callback (gpt-commit-parse-response data))))
+      :error
+      (cl-function
+       (lambda (&rest args &key data error-thrown &allow-other-keys)
+         (message "Error: %s %s" error-thrown data))))))
 
 (defun gpt-commit-generate-message (callback)
   "Generate a commit message using GPT and pass it to the CALLBACK."
@@ -146,6 +162,7 @@ A scope may be provided to a commit's type, to provide additional contextual inf
                       (content . ,changes))]))
     (gpt-commit-openai-chat-completions-api messages callback)))
 
+;;;###autoload
 (defun gpt-commit-message ()
   "Automatically generate a conventional commit message using GPT-Commit.
 
@@ -161,19 +178,21 @@ GPT model name in the respective variables:
 - `gpt-commit-openai-key'
 - `gpt-commit-model-name'
 
-Example usage:
-  (require 'gpt-commit)
+Example usage.
+  (require \\='gpt-commit)
   (setq gpt-commit-openai-key \"YOUR_OPENAI_API_KEY\")
   (setq gpt-commit-model-name \"gpt-3.5-turbo-16k\")
-  (add-hook 'git-commit-setup-hook 'gpt-commit-message)"
-
+  (add-hook \\='git-commit-setup-hook \\='gpt-commit-message)"
   (interactive)
   (unless (git-commit-buffer-message)
     (let ((buffer (current-buffer)))
       (gpt-commit-generate-message
        (lambda (commit-message)
-	 (when commit-message
+         (when commit-message
            (with-current-buffer buffer
              (insert commit-message))))))))
 
+
+
+(provide 'gpt-commit)
 ;;; gpt-commit.el ends here
