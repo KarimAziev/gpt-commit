@@ -1,10 +1,10 @@
-;;; gpt-commit.el --- Commit messages with GPT in Emacs -*- lexical-binding: t; -*-
+;;; gpt-commit.el --- Commit messages with GPT -*- lexical-binding: t; -*-
 
 ;; Author: Youngwook Kim <youngwook.kim@gmail.com>
 ;;         Karim Aziiev <karim.aziiev@gmail.com>
 ;; URL: https://github.com/KarimAziev/gpt-commit
 ;; Package-Version: 0.0.2
-;; Package-Requires: ((emacs "27.1") (magit "3.3.0") (request "0.3.2"))
+;; Package-Requires: ((emacs "27.1") (magit "3.3.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Keywords: convenience
 
@@ -54,7 +54,6 @@
 ;;; Code:
 
 (require 'magit)
-(require 'request)
 
 (defcustom gpt-commit-model-name "gpt-4"
   "Model name to use for GPT chat completions."
@@ -164,40 +163,109 @@ Can also be a function of no arguments that returns an API key (more secure)."
          (content (cdr (assoc 'content message))))
     (decode-coding-string content 'utf-8)))
 
-(defun gpt-commit-openai-chat-completions-api (messages callback &optional
-                                                        error-callback model)
-  "Call OpenAI's Chat Completions API with MESSAGES and CALLBACK."
-  (let* ((headers
+
+(defvar url-http-end-of-headers)
+(defun gpt-commit--json-parse-string (str &optional object-type array-type
+                                          null-object false-object)
+  "Parse STR with natively compiled function or with json library.
+
+The argument OBJECT-TYPE specifies which Lisp type is used
+to represent objects; it can be `hash-table', `alist' or `plist'.  It
+defaults to `alist'.
+
+The argument ARRAY-TYPE specifies which Lisp type is used
+to represent arrays; `array'/`vector' and `list'.
+
+The argument NULL-OBJECT specifies which object to use
+to represent a JSON null value.  It defaults to `:null'.
+
+The argument FALSE-OBJECT specifies which object to use to
+represent a JSON false value.  It defaults to `:false'."
+  (if (and (fboundp 'json-parse-string)
+           (fboundp 'json-available-p)
+           (json-available-p))
+      (json-parse-string str
+                         :object-type (or object-type 'alist)
+                         :array-type
+                         (pcase array-type
+                           ('list 'list)
+                           ('vector 'array)
+                           (_ 'array))
+                         :null-object (or null-object :null)
+                         :false-object (or false-object :false))
+    (require 'json)
+    (let ((json-object-type (or object-type 'alist))
+          (json-array-type
+           (pcase array-type
+             ('list 'list)
+             ('array 'vector)
+             (_ 'vector)))
+          (json-null (or null-object :null))
+          (json-false (or false-object :false)))
+      (json-read-from-string str))))
+
+(defun gpt-commit-doc-gpt-request (messages callback &optional error-callback
+                                            model)
+  "Send a POST request to the GPT API with specified MESSAGES and callbacks.
+
+Argument MESSAGES is a list of message objects to be sent to the GPT-3 MODEL.
+
+Argument CALLBACK is a function to be called when the GPT-3 MODEL returns a
+successful response.
+
+Optional argument ERROR-CALLBACK is a function to be called when the GPT-3 MODEL
+returns an error response.
+If not provided, no function will be called in case of an error.
+
+Optional argument MODEL is a string representing the GPT-3 MODEL to be used for
+the request.
+If not provided, the default MODEL specified in `gpt-commit-model-name' will be
+used."
+  (require 'url)
+  (let* ((url-request-method "POST")
+         (url-request-extra-headers
           `(("Content-Type" . "application/json")
             ("Authorization" . ,(concat "Bearer " (if (functionp
                                                        'gpt-commit-openai-key)
                                                       (funcall
                                                        gpt-commit-openai-key)
                                                     gpt-commit-openai-key)))))
-         (json-string (json-serialize `((model . ,(or model
-                                                      gpt-commit-model-name))
-                                        (messages . ,messages))))
-         (payload (encode-coding-string json-string 'utf-8)))
-    (request gpt-commit-api-url
-      :type "POST"
-      :headers headers
-      :data payload
-      :parser 'json-read
-      :timeout 10
-      :success
-      (cl-function
-       (lambda (&key data &allow-other-keys)
-         (funcall callback (gpt-commit-parse-response data))))
-      :error
-      (cl-function
-       (lambda (&rest args &key data error-thrown &allow-other-keys)
-         (if error-callback
-             (funcall error-callback error-thrown data)
-           (message "GPT Error: %s %s" error-thrown data)))))))
+         (data `((model . ,(or model gpt-commit-model-name))
+                 (messages . ,messages)))
+         (url-request-data
+          (json-encode data)))
+    (url-retrieve gpt-commit-api-url
+                  (lambda (status &rest _)
+                    (if (plist-get status :error)
+                        (funcall error-callback (plist-get status :error) status)
+                      (let ((response (gpt-commit--json-parse-string
+                                       (buffer-substring-no-properties
+                                        url-http-end-of-headers
+                                        (point-max)))))
+                        (if (assoc 'error response)
+                            (funcall error-callback
+                                     (cdr
+                                      (assoc 'message
+                                             (cdr
+                                              (assoc
+                                               'error
+                                               response))))
+                                     status)
+                          (funcall callback
+                                   (cdr
+                                    (assq 'content
+                                          (cdr
+                                           (assq 'message
+                                                 (elt
+                                                  (cdr
+                                                   (assq 'choices
+                                                         response))
+                                                  0)))))))))))))
+
 
 
 (defun gpt-commit-generate-message (msg callback)
-  "Generate a commit message using GPT and pass it to the CALLBACK."
+  "Generate a commit message MSG using GPT and pass it to the CALLBACK."
   (let* ((lines (magit-git-lines "diff" "--cached"))
          (changes (string-join lines "\n"))
          (user-prompt (format "%s\n\ngit diff output:\n```%s```"
@@ -208,21 +276,21 @@ Can also be a function of no arguments that returns an API key (more secure)."
                       (content . ,user-prompt))]))
     (if (and gpt-commit-fallback-model
              (not (equal gpt-commit-fallback-model gpt-commit-model-name)))
-        (gpt-commit-openai-chat-completions-api messages callback
-                                                (lambda (error-thrown data)
-                                                  (message
-                                                   "GPT %s Error: %s %s, retrying with %s"
-                                                   gpt-commit-model-name
-                                                   error-thrown data
-                                                   gpt-commit-fallback-model)
-                                                  (gpt-commit-openai-chat-completions-api
-                                                   messages
-                                                   callback
-                                                   nil
-                                                   gpt-commit-fallback-model))
-                                                gpt-commit-model-name)
-      (gpt-commit-openai-chat-completions-api messages callback
-                                              nil gpt-commit-model-name))))
+        (gpt-commit-doc-gpt-request messages callback
+                                    (lambda (error-thrown data)
+                                      (message
+                                       "GPT %s Error: %s %s, retrying with %s"
+                                       gpt-commit-model-name
+                                       error-thrown data
+                                       gpt-commit-fallback-model)
+                                      (gpt-commit-doc-gpt-request
+                                       messages
+                                       callback
+                                       nil
+                                       gpt-commit-fallback-model))
+                                    gpt-commit-model-name)
+      (gpt-commit-doc-gpt-request messages callback
+                                  nil gpt-commit-model-name))))
 
 
 
@@ -275,7 +343,7 @@ Example usage.
   (require \\='gpt-commit)
   (setq gpt-commit-openai-key \"YOUR_OPENAI_API_KEY\")
   (setq gpt-commit-model-name \"gpt-4)
-  (setq gpt-commit-fallback-model \"gpt-3.5-turbo-16k\") "
+  (setq gpt-commit-fallback-model \"gpt-3.5-turbo-16k\")."
   (interactive)
   (let ((buffer (current-buffer))
         (msg (git-commit-buffer-message)))
