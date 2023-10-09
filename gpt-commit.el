@@ -53,10 +53,17 @@
 (require 'magit)
 (require 'request)
 
-(defcustom gpt-commit-model-name "gpt-3.5-turbo"
+(defcustom gpt-commit-model-name "gpt-4"
   "Model name to use for GPT chat completions."
   :group 'gpt-commit
   :type 'string)
+
+(defcustom gpt-commit-fallback-model "gpt-3.5-turbo-16k"
+  "Fallback model name if `gpt-commit-model-name' is failed."
+  :group 'gpt-commit
+  :type '(radio
+          (string :tag "API key" "gpt-3.5-turbo-16k")
+          (const :tag "None" nil)))
 
 (defcustom gpt-commit-api-url "https://api.openai.com/v1/chat/completions"
   "API endpoint for GPT chat completions."
@@ -72,7 +79,8 @@ Can also be a function of no arguments that returns an API key (more secure)."
           (function :tag "Function that returns the API key")))
 
 
-(defcustom gpt-commit-system-prompt-en "Based on the user-supplied incomplete commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message accurately encompassing the changes. Ensure that your response strictly contains the refined commit message, without including any extraneous information."
+
+(defcustom gpt-commit-system-prompt-en "Based on the user-supplied incomplete commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message accurately encompassing the changes. Ensure that your response strictly contains the refined commit message, without including any extraneous information. Fill text lines to be no longer than 70."
   "Prompt (directive) for ChatGPT to generate commit message."
   :type 'string
   :group 'gpt-commit)
@@ -153,7 +161,8 @@ Can also be a function of no arguments that returns an API key (more secure)."
          (content (cdr (assoc 'content message))))
     (decode-coding-string content 'utf-8)))
 
-(defun gpt-commit-openai-chat-completions-api (messages callback)
+(defun gpt-commit-openai-chat-completions-api (messages callback &optional
+                                                        error-callback model)
   "Call OpenAI's Chat Completions API with MESSAGES and CALLBACK."
   (let* ((headers
           `(("Content-Type" . "application/json")
@@ -162,7 +171,8 @@ Can also be a function of no arguments that returns an API key (more secure)."
                                                       (funcall
                                                        gpt-commit-openai-key)
                                                     gpt-commit-openai-key)))))
-         (json-string (json-serialize `((model . ,gpt-commit-model-name)
+         (json-string (json-serialize `((model . ,(or model
+                                                      gpt-commit-model-name))
                                         (messages . ,messages))))
          (payload (encode-coding-string json-string 'utf-8)))
     (request gpt-commit-api-url
@@ -174,12 +184,13 @@ Can also be a function of no arguments that returns an API key (more secure)."
       :success
       (cl-function
        (lambda (&key data &allow-other-keys)
-         (funcall callback (gpt-commit-normalize-message
-                            (gpt-commit-parse-response data)))))
+         (funcall callback (gpt-commit-parse-response data))))
       :error
       (cl-function
        (lambda (&rest args &key data error-thrown &allow-other-keys)
-         (message "Error: %s %s" error-thrown data))))))
+         (if error-callback
+             (funcall error-callback error-thrown data)
+           (message "GPT Error: %s %s" error-thrown data)))))))
 
 
 (defun gpt-commit-generate-message (msg callback)
@@ -192,28 +203,22 @@ Can also be a function of no arguments that returns an API key (more secure)."
                       (content . ,gpt-commit-system-prompt-en))
                      ((role . "user")
                       (content . ,user-prompt))]))
-    (gpt-commit-openai-chat-completions-api messages callback)))
-
-
-(defun gpt-commit-normalize-message (message)
-  "Normalize the format of a commit MESSAGE.
-
-Argument MESSAGE is a string that represents the commit MESSAGE to be
-normalized."
-  (with-temp-buffer
-    (insert message)
-    (goto-char (point-min))
-    (when (zerop (forward-line 1))
-      (unless (string-empty-p
-               (string-trim
-                (buffer-substring-no-properties (point)
-                                                (line-end-position))))
-        (insert "\n"))
-      (when (re-search-forward "^[\s\t\n\r\f]" nil t 1)
-        (forward-char -1))
-      (fill-region-as-paragraph (point)
-                                (point-max)))
-    (buffer-string)))
+    (if (and gpt-commit-fallback-model
+             (not (equal gpt-commit-fallback-model gpt-commit-model-name)))
+        (gpt-commit-openai-chat-completions-api messages callback
+                                                (lambda (error-thrown data)
+                                                  (message
+                                                   "GPT %s Error: %s %s, retrying with %s"
+                                                   gpt-commit-model-name
+                                                   error-thrown data
+                                                   gpt-commit-fallback-model)
+                                                  (gpt-commit-openai-chat-completions-api
+                                                   messages
+                                                   callback
+                                                   nil
+                                                   gpt-commit-fallback-model))
+                                                gpt-commit-model-name)
+      (gpt-commit-openai-chat-completions-api messages callback))))
 
 
 
