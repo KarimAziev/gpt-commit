@@ -1,11 +1,12 @@
 ;;; gpt-commit.el --- Commit messages with GPT in Emacs -*- lexical-binding: t; -*-
 
 ;; Author: Youngwook Kim <youngwook.kim@gmail.com>
-;; URL: https://github.com/ywkim/gpt-commit
+;;         Karim Aziiev <karim.aziiev@gmail.com>
+;; URL: https://github.com/KarimAziev/gpt-commit
 ;; Package-Version: 0.0.2
-;; Package-Requires: ((emacs "27.1") (magit "2.90") (request "0.3.2"))
-
+;; Package-Requires: ((emacs "27.1") (magit "3.3.0") (request "0.3.2"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Keywords: convenience
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -43,9 +44,11 @@
 ;; the overall maintainability of your codebase.
 ;;
 ;; (require 'gpt-commit)
+;; (require 'git-commit)
 ;; (setq gpt-commit-openai-key "YOUR_OPENAI_API_KEY")
-;; (setq gpt-commit-model-name "gpt-3.5-turbo-16k")
-;; (add-hook 'git-commit-setup-hook 'gpt-commit-message)
+;; (setq gpt-commit-model-name "gpt-4")
+;; (setq gpt-commit-fallback-model "gpt-3.5-turbo-16k")
+;; (define-key git-commit-mode-map (kbd "C-c *") #'gpt-commit-message)
 
 
 ;;; Code:
@@ -62,7 +65,7 @@
   "Fallback model name if `gpt-commit-model-name' is failed."
   :group 'gpt-commit
   :type '(radio
-          (string :tag "API key" "gpt-3.5-turbo-16k")
+          (string :tag "Model" "gpt-3.5-turbo-16k")
           (const :tag "None" nil)))
 
 (defcustom gpt-commit-api-url "https://api.openai.com/v1/chat/completions"
