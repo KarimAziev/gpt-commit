@@ -2,7 +2,7 @@
 
 ![Screenshot](screenshots/magit-commit.png)
 
-GPT-Commit is an Emacs package that automatically generates conventional commit messages using the [GPT (Generative Pre-trained Transformer)](https://openai.com/research/gpt-3) model from OpenAI.
+GPT-Commit is an Emacs package that prompts commit type and generates conventional commit messages using the [GPT (Generative Pre-trained Transformer)](https://openai.com/research/gpt-3) model from OpenAI.
 
 ## Table of Contents
 
@@ -41,22 +41,24 @@ To install this package manually, clone this repository and add the following to
 (setq gpt-commit-openai-key "YOUR_OPENAI_API_KEY")
 ```
 
-2. **Set GPT Model Name** (Optional): By default, it uses the `gpt-3.5-turbo` model. If you wish to use a different model, you can set it like this:
+2. **Set GPT Model Name** (Optional): By default, it uses the `gpt-4` as primary model and `gpt-3.5-turbo-16k` as fallback model. If you wish to use a different model, you can set it like this:
 
 ```emacs-lisp
-(setq gpt-commit-model-name "YOUR_PREFERRED_MODEL_NAME")
+(setq gpt-commit-model-name "gpt-4")
+;; disable fallback model
+(setq gpt-commit-fallback-model nil)
 ```
 
-3. **Add Hook**: Add the `gpt-commit-message` function to the `git-commit-setup-hook` to automatically generate commit messages when the commit message editor starts:
+3. **Add keybinding**: Bind `gpt-commit-message` function to the `git-commit-mode-map`:
 
 ```emacs-lisp
 (require 'gpt-commit)
-(add-hook 'git-commit-setup-hook 'gpt-commit-message)
+(define-key git-commit-mode-map (kbd "C-c *") #'gpt-commit-message)
 ```
 
 ## Usage
 
-Once you have configured `gpt-commit`, it will automatically generate a commit message using the GPT model whenever you perform a Git commit. You can accept the message by saving and closing the editor, or you can modify the message as needed.
+In git-commit-mode run `gpt-commit-message`.
 
 Please note that using the OpenAI API might incur costs, and there might be usage limitations. Be aware of the [OpenAI pricing and policy](https://openai.com/pricing) before extensive use.
 

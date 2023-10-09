@@ -218,7 +218,8 @@ Can also be a function of no arguments that returns an API key (more secure)."
                                                    nil
                                                    gpt-commit-fallback-model))
                                                 gpt-commit-model-name)
-      (gpt-commit-openai-chat-completions-api messages callback))))
+      (gpt-commit-openai-chat-completions-api messages callback
+                                              nil gpt-commit-model-name))))
 
 
 
@@ -265,12 +266,13 @@ To use this feature, make sure you have set the OpenAI API key and
 GPT model name in the respective variables:
 - `gpt-commit-openai-key'
 - `gpt-commit-model-name'
+- `gpt-commit-fallback-model'
 
 Example usage.
   (require \\='gpt-commit)
   (setq gpt-commit-openai-key \"YOUR_OPENAI_API_KEY\")
-  (setq gpt-commit-model-name \"gpt-3.5-turbo-16k\")
-  (add-hook \\='git-commit-setup-hook \\='gpt-commit-message)"
+  (setq gpt-commit-model-name \"gpt-4)
+  (setq gpt-commit-fallback-model \"gpt-3.5-turbo-16k\") "
   (interactive)
   (let ((buffer (current-buffer))
         (msg (git-commit-buffer-message)))
