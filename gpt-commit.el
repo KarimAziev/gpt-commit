@@ -72,50 +72,78 @@ Can also be a function of no arguments that returns an API key (more secure)."
           (function :tag "Function that returns the API key")))
 
 
-(defcustom gpt-commit-system-prompt-en "The user provides the result of running `git diff --cached`. You suggest a conventional commit message. Don't add anything else to the response. The following describes conventional commits.
-
-# Conventional Commits 1.0.0
-
-## Summary
-
-The Conventional Commits specification is a lightweight convention on top of commit messages.
-It provides an easy set of rules for creating an explicit commit history;
-which makes it easier to write automated tools on top of.
-This convention dovetails with [SemVer](http://semver.org),
-by describing the features, fixes, and breaking changes made in commit messages.
-
-The commit message should be structured as follows:
-
----
-
-```
-<type>[optional scope]: <description>
-
-[optional body]
-
-[optional footer(s)]
-```
----
-
-<br />
-The commit contains the following structural elements, to communicate intent to the
-consumers of your library:
-
-1. **fix:** a commit of the _type_ `fix` patches a bug in your codebase (this correlates with [`PATCH`](http://semver.org/#summary) in Semantic Versioning).
-1. **feat:** a commit of the _type_ `feat` introduces a new feature to the codebase (this correlates with [`MINOR`](http://semver.org/#summary) in Semantic Versioning).
-1. **BREAKING CHANGE:** a commit that has a footer `BREAKING CHANGE:`, or appends a `!` after the type/scope, introduces a breaking API change (correlating with [`MAJOR`](http://semver.org/#summary) in Semantic Versioning).
-A BREAKING CHANGE can be part of commits of any _type_.
-1. _types_ other than `fix:` and `feat:` are allowed, for example [@commitlint/config-conventional](https://github.com/conventional-changelog/commitlint/tree/master/%40commitlint/config-conventional) (based on the [Angular convention](https://github.com/angular/angular/blob/22b96b9/CONTRIBUTING.md#-commit-message-guidelines)) recommends `build:`, `chore:`,
-  `ci:`, `docs:`, `style:`, `refactor:`, `perf:`, `test:`, and others.
-1. _footers_ other than `BREAKING CHANGE: <description>` may be provided and follow a convention similar to
-  [git trailer format](https://git-scm.com/docs/git-interpret-trailers).
-
-Additional types are not mandated by the Conventional Commits specification, and have no implicit effect in Semantic Versioning (unless they include a BREAKING CHANGE).
-<br /><br />
-A scope may be provided to a commit's type, to provide additional contextual information and is contained within parenthesis, e.g., `feat(parser): add ability to parse arrays`."
+(defcustom gpt-commit-system-prompt-en "Based on the user-supplied incomplete commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message accurately encompassing the changes. Ensure that your response strictly contains the refined commit message, without including any extraneous information."
   "Prompt (directive) for ChatGPT to generate commit message."
   :type 'string
   :group 'gpt-commit)
+
+(defcustom gpt-commit-types-alist '(("feat"
+                                     (description . "A new feature")
+                                     (title . "Features")
+                                     (emoji . "✨"))
+                                    ("fix"
+                                     (description . "A bug fix")
+                                     (title . "Bug Fixes")
+                                     (emoji . "🐛"))
+                                    ("docs"
+                                     (description . "Documentation only changes")
+                                     (title . "Documentation")
+                                     (emoji . "📚"))
+                                    ("style"
+                                     (description . "Changes that do not affect the meaning of the code (white-space, formatting, missing semi-colons, etc)")
+                                     (title . "Styles")
+                                     (emoji . "💎"))
+                                    ("refactor"
+                                     (description . "A code change that neither fixes a bug nor adds a feature")
+                                     (title . "Code Refactoring")
+                                     (emoji . "📦"))
+                                    ("perf"
+                                     (description . "A code change that improves performance")
+                                     (title . "Performance Improvements")
+                                     (emoji . "🚀"))
+                                    ("test"
+                                     (description . "Adding missing tests or correcting existing tests")
+                                     (title . "Tests")
+                                     (emoji . "🚨"))
+                                    ("build"
+                                     (description . "Changes that affect the build system or external dependencies (example scopes: gulp, broccoli, npm)")
+                                     (title . "Builds")
+                                     (emoji . "🛠"))
+                                    ("ci"
+                                     (description . "Changes to our CI configuration files and scripts (example scopes: Travis, Circle, BrowserStack, SauceLabs)")
+                                     (title . "Continuous Integrations")
+                                     (emoji . "⚙️"))
+                                    ("chore"
+                                     (description . "Other changes that don't modify src or test files")
+                                     (title . "Chores")
+                                     (emoji . "♻️"))
+                                    ("revert"
+                                     (description . "Reverts a previous commit")
+                                     (title . "Reverts")
+                                     (emoji . "🗑")))
+  "A key-value-alist of commit types."
+  :group 'gpt-commit
+  :type '(alist
+          :key-type string
+          :value-type (set :tag "Annotation rules"
+                           (cons (const :tag "" title)
+                                 (string))
+                           (cons :tag "Description"
+                                 (const :tag "" description)
+                                 (string))
+                           (cons :tag "Emoji"
+                                 (const :tag "" emoji)
+                                 (string)))))
+
+(defcustom gpt-commit-annotation-spec-alist '((emoji "️%s" 15)
+                                              (description "%s" 80))
+  "Alist of symbol, format string and width for displaying a GitHub repository."
+  :group 'gpt-commit
+  :type '(alist
+          :key-type symbol
+          :value-type (list
+                       (string :tag "Column Name" "%s")
+                       (integer :tag "Column Width" 20))))
 
 (defun gpt-commit-parse-response (data)
   "Parse the GPT response DATA."
@@ -146,21 +174,76 @@ A scope may be provided to a commit's type, to provide additional contextual inf
       :success
       (cl-function
        (lambda (&key data &allow-other-keys)
-         (funcall callback (gpt-commit-parse-response data))))
+         (funcall callback (gpt-commit-normalize-message
+                            (gpt-commit-parse-response data)))))
       :error
       (cl-function
        (lambda (&rest args &key data error-thrown &allow-other-keys)
          (message "Error: %s %s" error-thrown data))))))
 
-(defun gpt-commit-generate-message (callback)
+
+(defun gpt-commit-generate-message (msg callback)
   "Generate a commit message using GPT and pass it to the CALLBACK."
   (let* ((lines (magit-git-lines "diff" "--cached"))
          (changes (string-join lines "\n"))
+         (user-prompt (format "%s\n\ngit diff output:\n```%s```"
+                              msg changes))
          (messages `[((role . "system")
                       (content . ,gpt-commit-system-prompt-en))
                      ((role . "user")
-                      (content . ,changes))]))
+                      (content . ,user-prompt))]))
     (gpt-commit-openai-chat-completions-api messages callback)))
+
+
+(defun gpt-commit-normalize-message (message)
+  "Normalize the format of a commit MESSAGE.
+
+Argument MESSAGE is a string that represents the commit MESSAGE to be
+normalized."
+  (with-temp-buffer
+    (insert message)
+    (goto-char (point-min))
+    (when (zerop (forward-line 1))
+      (unless (string-empty-p
+               (string-trim
+                (buffer-substring-no-properties (point)
+                                                (line-end-position))))
+        (insert "\n"))
+      (when (re-search-forward "^[\s\t\n\r\f]" nil t 1)
+        (forward-char -1))
+      (fill-region-as-paragraph (point)
+                                (point-max)))
+    (buffer-string)))
+
+
+
+(defun gpt-commit-read-type ()
+  "Prompt user to select the type of change they're committing."
+  (let* ((alist gpt-commit-types-alist)
+         (max-len (apply #'max (mapcar
+                                (lambda (it)
+                                  (length (car it)))
+                                gpt-commit-types-alist)))
+         (annotf (lambda (str)
+                   (let ((rule-alist (cdr (assoc-string str alist)))
+                         (prefix (make-string (- max-len (length str)) ?\ )))
+                     (concat prefix " "
+                             (mapconcat
+                              (pcase-lambda (`(,key ,format-str ,width))
+                                (let ((value (alist-get key rule-alist)))
+                                  (truncate-string-to-width
+                                   (format format-str (or value
+                                                          ""))
+                                   width
+                                   0 nil
+                                   t)))
+                              gpt-commit-annotation-spec-alist))))))
+    (completing-read "Select the type of change that you're committing:"
+                     (lambda (str pred action)
+                       (if (eq action 'metadata)
+                           `(metadata
+                             (annotation-function . ,annotf))
+                         (complete-with-action action alist str pred))))))
 
 ;;;###autoload
 (defun gpt-commit-message ()
@@ -184,13 +267,21 @@ Example usage.
   (setq gpt-commit-model-name \"gpt-3.5-turbo-16k\")
   (add-hook \\='git-commit-setup-hook \\='gpt-commit-message)"
   (interactive)
-  (unless (git-commit-buffer-message)
-    (let ((buffer (current-buffer)))
-      (gpt-commit-generate-message
-       (lambda (commit-message)
-         (when commit-message
-           (with-current-buffer buffer
-             (insert commit-message))))))))
+  (let ((buffer (current-buffer))
+        (msg (git-commit-buffer-message)))
+    (unless msg
+      (setq msg (gpt-commit-read-type))
+      (insert msg))
+    (gpt-commit-generate-message
+     msg
+     (lambda (commit-message)
+       (when commit-message
+         (with-current-buffer buffer
+           (if (bobp)
+               (insert commit-message)
+             (replace-region-contents (point-min)
+                                      (point)
+                                      (lambda () commit-message)))))))))
 
 
 
