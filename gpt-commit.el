@@ -232,8 +232,9 @@ used."
                                                     gpt-commit-openai-key)))))
          (data `((model . ,(or model gpt-commit-model-name))
                  (messages . ,messages)))
+         (payload (encode-coding-string (json-serialize data) 'utf-8))
          (url-request-data
-          (json-encode data)))
+          payload))
     (url-retrieve gpt-commit-api-url
                   (lambda (status &rest _)
                     (if (plist-get status :error)
