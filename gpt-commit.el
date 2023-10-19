@@ -88,6 +88,11 @@ Can also be a function of no arguments that returns an API key (more secure)."
   :type 'string
   :group 'gpt-commit)
 
+(defcustom gpt-commit-improve-system-prompt "The user will feed you a commit message. Your job is to evaluate the grammar and refine it if necessary. Make sure to preserve the original meaning and maintain the context of the message. The refined message should remain the only content in your response, and ensure that the lines do not surpass 70 characters in length."
+  "Prompt (directive) for ChatGPT to improve commit message."
+  :type 'string
+  :group 'gpt-commit)
+
 (defcustom gpt-commit-types-alist '(("feat"
                                      (description . "A new feature")
                                      (title . "Features")
@@ -345,7 +350,10 @@ used."
                            (when (re-search-forward re nil t 1)
                              (match-string-no-properties 0))))))
 
-
+(defun gpt-commit-get-commit-type-regex ()
+  "Generate a regex to match the start of commit types."
+  (concat "^" (regexp-opt (mapcar #'car
+                                  gpt-commit-types-alist))))
 
 ;;;###autoload
 (defun gpt-commit-toggle-commit-type ()
@@ -421,6 +429,79 @@ used."
                (goto-char (point-min))
                (insert (format "%s: " new-type)))))))
 
+(defun gpt-commit--improve-message (msg callback)
+  "Improve a commit message MSG using GPT and pass it to the CALLBACK."
+  (let ((messages `[((role . "system")
+                     (content . ,gpt-commit-improve-system-prompt))
+                    ((role . "user")
+                     (content . ,msg))]))
+    (if (and gpt-commit-fallback-model
+             (not (equal gpt-commit-fallback-model gpt-commit-model-name)))
+        (gpt-commit-doc-gpt-request messages callback
+                                    (lambda (error-thrown data)
+                                      (message
+                                       "GPT %s Error: %s %s, retrying with %s"
+                                       gpt-commit-model-name
+                                       error-thrown data
+                                       gpt-commit-fallback-model)
+                                      (gpt-commit-doc-gpt-request
+                                       messages
+                                       callback
+                                       nil
+                                       gpt-commit-fallback-model))
+                                    gpt-commit-model-name)
+      (gpt-commit-doc-gpt-request messages callback
+                                  nil gpt-commit-model-name))))
+
+(defun gpt-commit-get-commit-msg-end ()
+  "Find the end position of the commit message in a buffer."
+  (save-excursion
+    (if (re-search-forward "^#" nil t 1)
+        (progn (forward-char -1)
+               (forward-line -1))
+      (goto-char (point-max)))
+    (while (looking-at "\n")
+      (forward-line -1))
+    (line-end-position)))
+
+(defun gpt-commit-improve-message ()
+  "Improve the current git commit message using GPT."
+  (interactive)
+  (let* ((buffer (current-buffer))
+         (msg (git-commit-buffer-message))
+         (regex (concat (gpt-commit-get-commit-type-regex)  "\\([(][^)]+[)]\\)?"
+                        ":[\s\t]*"))
+         (prefix
+          (and msg
+               (with-temp-buffer (insert msg)
+                                 (goto-char (point-min))
+                                 (when (re-search-forward regex nil
+                                                          t 1)
+                                   (match-string-no-properties 0))))))
+    (unless msg
+      (user-error "No commit message to improve"))
+    (gpt-commit--improve-message
+     (if prefix
+         (substring-no-properties msg (length prefix))
+       msg)
+     (lambda (commit-message)
+       (when commit-message
+         (with-current-buffer buffer
+           (goto-char (point-min))
+           (when prefix
+             (re-search-forward ":" nil t 1)
+             (if (looking-at "[\s\t]")
+                 (skip-chars-forward "\s\t")
+               (insert "\s")))
+           (delete-region (point)
+                          (gpt-commit-get-commit-msg-end))
+           (save-excursion
+             (insert (concat commit-message "\n\n")))
+           (downcase-word 1)
+           (goto-char (line-end-position))
+           (when (looking-at "\n[^\n#]")
+             (insert "\n"))))))))
+
 ;;;###autoload
 (defun gpt-commit-message ()
   "Automatically generate a conventional commit message using GPT-Commit.
@@ -484,13 +565,12 @@ Example usage.
    ("o" gpt-commit-update-commit-type
     :description (lambda ()
                    (or
-                    (when-let*
-                        ((current
-                          (gpt-commit-current-commit-type))
-                         (cell
-                          (assoc-string
-                           current
-                           gpt-commit-types-alist)))
+                    (when-let* ((current
+                                 (gpt-commit-current-commit-type))
+                                (cell
+                                 (assoc-string
+                                  current
+                                  gpt-commit-types-alist)))
                       (string-join
                        (delq nil
                              (list (alist-get
@@ -501,7 +581,9 @@ Example usage.
                                     cell)))
                        " "))
                     "None")))
-   ("c" "GPT Commit" gpt-commit-message)]
+   ("c" "GPT Commit" gpt-commit-message)
+   ("f" "GPT improve" gpt-commit-improve-message
+    :inapt-if-not git-commit-buffer-message)]
   ["Issue Key"
    ("i" gpt-commit-update-issue-key
     :inapt-if-not gpt-commit--retrieve-issue-key-from-branch
