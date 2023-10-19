@@ -385,11 +385,11 @@ used."
                (goto-char (point-min))
                (re-search-forward type-re nil t 1)
                (insert (format "(%s)" issue-key))))
-            ((string-match-p (concat type-re "[(]\\([^)]+]\\)[)]") msg)
+            ((string-match-p (concat type-re "[(]\\([^)]+\\)[)]") msg)
              (save-excursion
                (goto-char (point-min))
                (re-search-forward type-re nil t 1)
-               (when (re-search-forward "[(]\\([^)]+]\\)[)]" nil t 1)
+               (when (re-search-forward "[(]\\([^)]+\\)[)]" nil t 1)
                  (replace-match issue-key nil nil nil 1))))))))
 
 ;;;###autoload
@@ -404,8 +404,14 @@ used."
                 (string-match-p (concat type-re "[(:]") msg))
            (save-excursion
              (goto-char (point-min))
-             (when (re-search-forward (concat type-re "[(:]") nil t 1)
-               (replace-match "" nil nil nil 0))))
+             (when (re-search-forward type-re nil t 1)
+               (replace-match "" nil nil nil 0))
+             (if (looking-at ":")
+                 (delete-char 1)
+               (when (looking-at "[(]\\([^)]+\\)[)]")
+                 (re-search-forward "[(]\\([^)]+\\)[)]" nil t 1)
+                 (let ((str (match-string-no-properties 1)))
+                   (replace-match str nil nil nil 0))))))
           ((not msg)
            (goto-char (point-min))
            (insert (format "%s: " new-type)))
