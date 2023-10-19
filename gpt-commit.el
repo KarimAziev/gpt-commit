@@ -4,7 +4,7 @@
 ;;         Karim Aziiev <karim.aziiev@gmail.com>
 ;; URL: https://github.com/KarimAziev/gpt-commit
 ;; Package-Version: 0.0.2
-;; Package-Requires: ((emacs "27.1") (magit "3.3.0"))
+;; Package-Requires: ((emacs "28.1") (magit "3.3.0") (transient "0.4.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Keywords: convenience
 
@@ -54,6 +54,7 @@
 ;;; Code:
 
 (require 'magit)
+(require 'transient)
 
 (defcustom gpt-commit-model-name "gpt-4"
   "Model name to use for GPT chat completions."
@@ -323,6 +324,103 @@ used."
                              (annotation-function . ,annotf))
                          (complete-with-action action alist str pred))))))
 
+(defun gpt-commit--retrieve-issue-key-from-branch ()
+  "Retrieve jira issue from STR."
+  (let ((branch (magit-get-current-branch)))
+    (let ((re "[[:upper:]]+[-_][[:digit:]]+"))
+      (when (string-match-p re branch)
+        (replace-regexp-in-string
+         (concat ".*?\\(" re "\\).*")
+         "\\1"
+         branch)))))
+
+(defun gpt-commit-current-commit-type ()
+  "Check and return the current commit type from the git commit message."
+  (when-let ((msg (git-commit-buffer-message))
+             (re (concat "^" (regexp-opt (mapcar #'car
+                                                 gpt-commit-types-alist)))))
+    (and (string-match-p re msg)
+         (with-temp-buffer (insert msg)
+                           (goto-char (point-min))
+                           (when (re-search-forward re nil t 1)
+                             (match-string-no-properties 0))))))
+
+
+
+;;;###autoload
+(defun gpt-commit-toggle-commit-type ()
+  "Toggle between different commit types in a `git-commit-mode'."
+  (interactive)
+  (let* ((current (gpt-commit-current-commit-type))
+         (next
+          (if-let ((cell (assoc-string current gpt-commit-types-alist)))
+              (caadr (member cell gpt-commit-types-alist))
+            (caar gpt-commit-types-alist))))
+    (gpt-commit-update-commit-type next)
+    (when transient-current-command
+      (transient-setup transient-current-command))))
+
+;;;###autoload
+(defun gpt-commit-update-issue-key (issue-key)
+  "Add or update the ISSUE-KEY from the current branch into the commit message."
+  (interactive (list
+                (gpt-commit--retrieve-issue-key-from-branch)))
+  (when issue-key
+    (let* ((msg (git-commit-buffer-message))
+           (type-re (concat "^" (regexp-opt (mapcar #'car
+                                                    gpt-commit-types-alist)))))
+      (cond ((not msg)
+             (goto-char (point-min))
+             (insert (format "%s: " issue-key)))
+            ((string-match-p (concat type-re ":") msg)
+             (save-excursion
+               (goto-char (point-min))
+               (re-search-forward type-re nil t 1)
+               (insert (format "(%s)" issue-key))))
+            ((string-match-p (concat type-re "[(]\\([^)]+]\\)[)]") msg)
+             (save-excursion
+               (goto-char (point-min))
+               (re-search-forward type-re nil t 1)
+               (when (re-search-forward "[(]\\([^)]+]\\)[)]" nil t 1)
+                 (replace-match issue-key nil nil nil 1))))))))
+
+;;;###autoload
+(defun gpt-commit-update-commit-type (new-type)
+  "Insert or replace the commit type with NEW-TYPE in a Git commit message."
+  (interactive (list (gpt-commit-read-type)))
+  (let ((msg (git-commit-buffer-message))
+        (type-re (concat "^" (regexp-opt (mapcar #'car
+                                                 gpt-commit-types-alist)))))
+    (cond ((and (or (not new-type)
+                    (string-empty-p new-type))
+                (string-match-p (concat type-re "[(:]") msg))
+           (save-excursion
+             (goto-char (point-min))
+             (when (re-search-forward (concat type-re "[(:]") nil t 1)
+               (replace-match "" nil nil nil 0))))
+          ((not msg)
+           (goto-char (point-min))
+           (insert (format "%s: " new-type)))
+          ((string-match-p (concat type-re "[(:]") msg)
+           (save-excursion
+             (goto-char (point-min))
+             (when (re-search-forward type-re nil t 1)
+               (replace-match new-type nil nil nil 0))))
+          ((string-match-p "^[[:upper:]]+[-_][[:digit:]]+" msg)
+           (save-excursion
+             (goto-char (point-min))
+             (when (re-search-forward "^[[:upper:]]+[-_][[:digit:]]+" nil t 1)
+               (let ((str (match-string-no-properties 0))
+                     (beg (match-beginning 0))
+                     (end (match-end 0)))
+                 (replace-region-contents beg end
+                                          (lambda ()
+                                            (format "%s(%s)" new-type
+                                                    str)))))))
+          (t (save-excursion
+               (goto-char (point-min))
+               (insert (format "%s: " new-type)))))))
+
 ;;;###autoload
 (defun gpt-commit-message ()
   "Automatically generate a conventional commit message using GPT-Commit.
@@ -350,7 +448,7 @@ Example usage.
         (msg (git-commit-buffer-message)))
     (unless msg
       (setq msg (gpt-commit-read-type))
-      (insert msg))
+      (insert msg (or (gpt-commit--retrieve-issue-key-from-branch) "") ":"))
     (gpt-commit-generate-message
      msg
      (lambda (commit-message)
@@ -361,6 +459,72 @@ Example usage.
              (replace-region-contents (point-min)
                                       (point)
                                       (lambda () commit-message)))))))))
+
+;;;###autoload (autoload 'gpt-commit-menu "gpt-commit" nil t)
+(transient-define-prefix gpt-commit-menu ()
+  "Git Commit Mode Menu."
+  ["Cycle"
+   ("p" "Previous message" git-commit-prev-message :transient t)
+   ("n" "Next message" git-commit-next-message :transient t)]
+  ["Commit Type"
+   ("t" gpt-commit-toggle-commit-type
+    :description (lambda ()
+                   (let ((current (gpt-commit-current-commit-type)))
+                     (mapconcat
+                      (pcase-lambda (`(,key . ,_cell))
+                        (propertize (format "%s" (substring-no-properties key))
+                                    'face
+                                    (if (and current
+                                             (string= current (substring-no-properties
+                                                               key)))
+                                        'transient-value
+                                      'transient-inactive-value)))
+                      gpt-commit-types-alist
+                      (propertize "|" 'face 'transient-inactive-value)))))
+   ("o" gpt-commit-update-commit-type
+    :description (lambda ()
+                   (or
+                    (when-let*
+                        ((current
+                          (gpt-commit-current-commit-type))
+                         (cell
+                          (assoc-string
+                           current
+                           gpt-commit-types-alist)))
+                      (string-join
+                       (delq nil
+                             (list (alist-get
+                                    'emoji
+                                    cell)
+                                   (alist-get
+                                    'description
+                                    cell)))
+                       " "))
+                    "None")))
+   ("c" "GPT Commit" gpt-commit-message)]
+  ["Issue Key"
+   ("i" gpt-commit-update-issue-key
+    :inapt-if-not gpt-commit--retrieve-issue-key-from-branch
+    :description (lambda ()
+                   (concat "Insert issue key ("
+                           (or (gpt-commit--retrieve-issue-key-from-branch)
+                               "None")
+                           ")")))]
+  ["Insert"
+   ("a" "Ack" git-commit-ack)
+   ("O" "Sign-Off" git-commit-signoff)
+   ("b" "Modified-by" git-commit-modified)
+   ("T" "Tested-by" git-commit-test)
+   ("r" "Reviewed-by" git-commit-review)
+   ("C" "CC (mentioning someone)" git-commit-cc)
+   ("e" "Reported" git-commit-reported)
+   ("s" "Suggested" git-commit-suggested)
+   ("-" "Co-authored-by" git-commit-co-authored)
+   ("d" "Co-developed-by" git-commit-co-developed)]
+  ["Do"
+   ("v" "Save" git-commit-save-message)
+   ("l" "Cancel" with-editor-cancel)
+   ("m" "Commit" with-editor-finish)])
 
 
 
