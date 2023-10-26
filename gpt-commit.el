@@ -153,7 +153,7 @@ Can also be a function of no arguments that returns an API key (more secure)."
 
 (defcustom gpt-commit-annotation-spec-alist '((emoji "️%s" 15)
                                               (description "%s" 80))
-  "Alist of symbol, format string and width for displaying a GitHub repository."
+  "Alist of symbol, format string and width for displaying commit type."
   :group 'gpt-commit
   :type '(alist
           :key-type symbol
@@ -470,8 +470,22 @@ used."
       (forward-line -1))
     (line-end-position)))
 
+;;;###autoload
 (defun gpt-commit-improve-message ()
-  "Improve the current git commit message using GPT."
+  "Analyze and generate an improved commit message using GPT-Commit.
+
+Unlike `gpt-commit-message', this command does not send the git diff output,
+but focuses solely on the current commit message.
+
+It generates an enhanced conventional commit message based on either the primary
+or the fallback model. If a commit type prefix (feat:, fix:, etc.) exists, this
+function preserves it and improves the remaining part.
+
+Customize `gpt-commit-improve-system-prompt' to modify the system prompt and
+`gpt-commit-types-alist' to specify conventional commit types.
+
+Before using, set OpenAI API key
+`gpt-commit-openai-key' and GPT model - `gpt-commit-model-name'."
   (interactive)
   (let* ((buffer (current-buffer))
          (msg (git-commit-buffer-message))
@@ -510,26 +524,22 @@ used."
 
 ;;;###autoload
 (defun gpt-commit-message ()
-  "Automatically generate a conventional commit message using GPT-Commit.
+  "Generate and insert a commit message using GPT-Commit.
 
-This function is a hook intended to be added to `git-commit-setup-hook'.
-When called, it analyzes the changes in the Git repository and generates
-a conventional commit message using the GPT model.
+This command is designed for `git-commit-mode'.
 
-The generated commit message follows the conventional commit format,
-providing a structured description of the changes made in the commit.
+It analyzes both the changes and the current commit message, then
+generates a conventional commit message using the primary model. If
+the primary model fails, it uses the fallback one.
 
-To use this feature, make sure you have set the OpenAI API key and
-GPT model name in the respective variables:
-- `gpt-commit-openai-key'
-- `gpt-commit-model-name'
-- `gpt-commit-fallback-model'
+Customize `gpt-commit-model-name' to set the primary model, and
+`gpt-commit-fallback-model' for the fallback.
 
-Example usage.
-  (require \\='gpt-commit)
-  (setq gpt-commit-openai-key \"YOUR_OPENAI_API_KEY\")
-  (setq gpt-commit-model-name \"gpt-4)
-  (setq gpt-commit-fallback-model \"gpt-3.5-turbo-16k\")."
+`gpt-commit-system-prompt-en' allows modification of the system prompt and
+`gpt-commit-types-alist' for specifying commit types.
+
+Prior to usage, setup OpenAI API key `gpt-commit-openai-key'
+and GPT model `gpt-commit-model-name'."
   (interactive)
   (let ((buffer (current-buffer))
         (msg (git-commit-buffer-message)))
@@ -549,7 +559,19 @@ Example usage.
 
 ;;;###autoload (autoload 'gpt-commit-menu "gpt-commit" nil t)
 (transient-define-prefix gpt-commit-menu ()
-  "Git Commit Mode Menu."
+  "Offer a menu for git commit-related operations, including GPT-Commit options.
+
+The 'Cycle' category allows navigation through commit messages.
+
+The 'Commit Type' category includes a toggle, update, generate, and enhance
+operations for commit messages.
+
+The 'Issue Key' category allows inserting an issue key if one exists in the
+branch name.
+
+The 'Insert' category includes options for adding
+content to the commit message. The 'Do' category includes actions for saving,
+cancelling, and committing."
   ["Cycle"
    ("p" "Previous message" git-commit-prev-message :transient t)
    ("n" "Next message" git-commit-next-message :transient t)]

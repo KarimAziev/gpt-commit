@@ -1,0 +1,91 @@
+#+OPTIONS: ^:nil tags:nil num:nil
+
+* About
+
+This fork of =gpt-commit= aims to extend the original version with several custom features, including:
+
+- Options to customize models - the primary (by default it is =gpt-4=) and fallback (by default it is =gpt-3.5-turbo-16k=), as well as their system prompts.
+- Utilize GPT to not only generate but also improve commit messages.
+- Option to specify commit types.
+- Detailed transient menu to interact with and manipulate commit messages, with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue key, and more.
+
+
+* Table of Contents                                       :TOC_2_gh:QUOTE:
+#+BEGIN_QUOTE
+- [[#about][About]]
+- [[#requirements][Requirements]]
+- [[#installation][Installation]]
+  - [[#with-use-package-and-straightel][With use-package and straight.el]]
+  - [[#manual-installation][Manual installation]]
+- [[#usage][Usage]]
+  - [[#customization][Customization]]
+#+END_QUOTE
+
+* Requirements
+
+| Name        | Version |
+|-------------+---------|
+| Emacs       |    28.1 |
+| ~magit~     |   3.3.0 |
+| ~transient~ |   0.4.1 |
+
+
+* Installation
+
+** With use-package and straight.el
+#+begin_src elisp :eval no
+(use-package gpt-commit
+  :straight (gpt-commit
+             :repo "KarimAziev/gpt-commit"
+             :type git
+             :branch "master"
+             :flavor nil
+             :host github)
+  :commands (gpt-commit-menu
+             gpt-commit-message
+             gpt-commit-improve-message
+             gpt-commit-update-commit-type
+             gpt-commit-update-issue-key
+             gpt-commit-toggle-commit-type))
+#+end_src
+
+** Manual installation
+
+Download the source code and put it wherever you like, e.g. into =~/.emacs.d/gpt-commit/=
+
+#+begin_src shell :eval no
+git clone https://github.com/KarimAziev/gpt-commit.git ~/.emacs.d/gpt-commit/
+#+end_src
+
+Add the downloaded directory to the load path:
+
+#+begin_src elisp :eval no
+(add-to-list 'load-path "~/.emacs.d/gpt-commit/")
+(require 'gpt-commit)
+#+end_src
+
+* Usage
+
+Run in =git-commit-mode=:
+
+**** ~M-x gpt-commit-menu~
+
+Detailed transient menu to interact with and manipulate commit messages, with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue key, and more.
+
+**** ~M-x gpt-commit-message~
+
+This comman analyzes both the changes and the current commit message, then generates a conventional commit message using the primary model. If the primary model fails, it uses the fallback one.
+
+**** ~M-x gpt-commit-improve-message~
+
+Analyze and generate an improved commit message using GPT-Commit.
+
+Unlike ~gpt-commit-message~, this command does not send the git diff output, but focuses solely on the current commit message.
+
+
+** Customization
+- =gpt-commit-model-name= to set the primary model
+- =gpt-commit-fallback-model= for the fallback model
+- =gpt-commit-system-prompt-en= allows modification of the system prompt in =gpt-commit-message= command
+- =gpt-commit-improve-system-prompt= allows modification of the system prompt in =gpt-commit-improve-message= command
+- =gpt-commit-types-alist= specifies available commit types
