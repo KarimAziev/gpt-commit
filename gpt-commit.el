@@ -211,6 +211,67 @@ represent a JSON false value.  It defaults to `:false'."
           (json-false (or false-object :false)))
       (json-read-from-string str))))
 
+
+(defvar-local gpt-commit-request-buffer nil)
+(defun gpt-commit-abort-url-retrieve (buff)
+  "Cancel the URL retrieval process and kill the associated buffer.
+
+Argument BUFF is a buffer object that represents the buffer to be checked and
+potentially killed."
+  (when (buffer-live-p buff)
+    (message "gpt-commit aborting request")
+    (let ((proc (get-buffer-process buff)))
+      (when proc
+        (delete-process proc))
+      (kill-buffer buff))))
+
+(defun gpt-commit-get-response-content (response)
+  "Get the content field from the choices array in the message of a RESPONSE."
+  (cdr
+   (assq 'content
+         (cdr
+          (assq 'message
+                (elt
+                 (cdr
+                  (assq 'choices
+                        response))
+                 0))))))
+
+(defun gpt-commit-get-status-error (response)
+  "Format and display error messages from `gpt-commit' request responses.
+
+Argument RESPONSE is a list that represents the response from the GPT commit
+request."
+  (when-let ((err (plist-get response :error)))
+    (concat (propertize
+             "gpt-commit request error: "
+             'face
+             'error)
+            (mapconcat (apply-partially #'format "%s")
+                       (delq nil
+                             (list (or
+                                    (when-let ((type
+                                                (ignore-errors
+                                                  (cadr
+                                                   err))))
+                                      type)
+                                    err)
+                                   (ignore-errors (caddr
+                                                   err))))
+                       " "))))
+
+(defun gpt-commit-get-response-error (response)
+  "Extract and format error message from a GPT commit RESPONSE.
+
+Argument RESPONSE is a list that represents the response from the GPT commit
+request."
+  (when-let ((err (cdr-safe (assq 'error response))))
+    (concat (propertize
+             "gpt-commit request error: "
+             'face
+             'error)
+            (format "%s" (or (cdr-safe (assq 'message err)) err)))))
+
 (defun gpt-commit-doc-gpt-request (messages callback &optional error-callback
                                             model)
   "Send a POST request to the GPT API with specified MESSAGES and callbacks.
@@ -229,6 +290,7 @@ the request.
 If not provided, the default MODEL specified in `gpt-commit-model-name' will be
 used."
   (require 'url)
+  (gpt-commit-abort-url-retrieve gpt-commit-request-buffer)
   (let* ((url-request-method "POST")
          (url-request-extra-headers
           `(("Content-Type" . "application/json")
@@ -242,38 +304,84 @@ used."
          (payload (encode-coding-string (json-serialize data) 'utf-8))
          (url-request-data
           payload))
-    (url-retrieve gpt-commit-api-url
-                  (lambda (status &rest _)
-                    (if (plist-get status :error)
-                        (funcall error-callback (plist-get status :error) status)
-                      (let ((response (gpt-commit--json-parse-string
-                                       (buffer-substring-no-properties
-                                        url-http-end-of-headers
-                                        (point-max)))))
-                        (if (assoc 'error response)
-                            (funcall error-callback
-                                     (cdr
-                                      (assoc 'message
-                                             (cdr
-                                              (assoc
-                                               'error
-                                               response))))
-                                     status)
-                          (funcall callback
-                                   (cdr
-                                    (assq 'content
-                                          (cdr
-                                           (assq 'message
-                                                 (elt
-                                                  (cdr
-                                                   (assq 'choices
-                                                         response))
-                                                  0)))))))))))))
+    (setq gpt-commit-request-buffer
+          (url-retrieve gpt-commit-api-url
+                        (lambda (status &rest _)
+                          (if-let ((err
+                                    (gpt-commit-get-status-error status)))
+                              (and error-callback
+                                   (funcall error-callback err status))
+                            (let* ((response
+                                    (gpt-commit--json-parse-string
+                                     (buffer-substring-no-properties
+                                      url-http-end-of-headers
+                                      (point-max))))
+                                   (response-err (gpt-commit-get-response-error
+                                                  response)))
+                              (if response-err
+                                  (and error-callback
+                                       (funcall error-callback response-err
+                                                status))
+                                (funcall callback
+                                         (gpt-commit-get-response-content
+                                          response))))))))))
+
+
+(defun gpt-commit--run-with-fallback (request-data callback buffer)
+  "Execute a GPT request and retry with a fallback model if an error occurs.
+
+Argument REQUEST-DATA is a data structure that contains the information needed
+to make the request.
+Argument CALLBACK is a function that will be called when the request is
+completed.
+Argument BUFFER is a BUFFER object where the request's response will be stored."
+  (let ((success-callback (lambda (&rest args)
+                            (when (buffer-live-p buffer)
+                              (with-current-buffer buffer
+                                (apply callback args)))))
+        (error-callback (if (and gpt-commit-fallback-model
+                                 (not (equal gpt-commit-fallback-model
+                                             gpt-commit-model-name)))
+                            (lambda (error-thrown &rest _)
+                              (if (not (buffer-live-p buffer))
+                                  (message
+                                   error-thrown)
+                                (message
+                                 "GPT %s error: %s, retrying with %s"
+                                 gpt-commit-model-name
+                                 error-thrown
+                                 gpt-commit-fallback-model)
+                                (with-current-buffer buffer
+                                  (gpt-commit-doc-gpt-request
+                                   request-data
+                                   callback
+                                   nil
+                                   gpt-commit-fallback-model))))
+                          (lambda (error-thrown &rest _)
+                            (message error-thrown)))))
+    (gpt-commit-doc-gpt-request
+     request-data
+     success-callback
+     error-callback
+     gpt-commit-model-name)))
+
+(defun gpt-commit--improve-message (msg buffer callback)
+  "Improve a commit message MSG in BUFFER and pass it to the CALLBACK."
+  (let ((messages `[((role . "system")
+                       (content . ,gpt-commit-improve-system-prompt))
+                      ((role . "user")
+                       (content . ,msg))]))
+      (gpt-commit--run-with-fallback messages callback buffer)))
 
 
 
-(defun gpt-commit-generate-message (msg callback)
-  "Generate a commit message MSG using GPT and pass it to the CALLBACK."
+(defun gpt-commit-generate-message (msg buffer callback)
+  "Generate a complete commit message based on user input and git diff output.
+
+Argument MSG is a string that represents the `user-supplied' incomplete commit
+message.
+Argument BUFFER is a buffer where in which function CALLBACK
+will be called when the request is completed."
   (let* ((lines (magit-git-lines "diff" "--cached"))
          (changes (string-join lines "\n"))
          (user-prompt (format "%s\n\ngit diff output:\n```%s```"
@@ -282,25 +390,7 @@ used."
                       (content . ,gpt-commit-system-prompt-en))
                      ((role . "user")
                       (content . ,user-prompt))]))
-    (if (and gpt-commit-fallback-model
-             (not (equal gpt-commit-fallback-model gpt-commit-model-name)))
-        (gpt-commit-doc-gpt-request messages callback
-                                    (lambda (error-thrown data)
-                                      (message
-                                       "GPT %s Error: %s %s, retrying with %s"
-                                       gpt-commit-model-name
-                                       error-thrown data
-                                       gpt-commit-fallback-model)
-                                      (gpt-commit-doc-gpt-request
-                                       messages
-                                       callback
-                                       nil
-                                       gpt-commit-fallback-model))
-                                    gpt-commit-model-name)
-      (gpt-commit-doc-gpt-request messages callback
-                                  nil gpt-commit-model-name))))
-
-
+    (gpt-commit--run-with-fallback messages callback buffer)))
 
 (defun gpt-commit-read-type ()
   "Prompt user to select the type of change they're committing."
@@ -311,34 +401,55 @@ used."
                                 gpt-commit-types-alist)))
          (annotf (lambda (str)
                    (let ((rule-alist (cdr (assoc-string str alist)))
-                         (prefix (make-string (- max-len (length str)) ?\ )))
-                     (concat prefix " "
-                             (mapconcat
-                              (pcase-lambda (`(,key ,format-str ,width))
-                                (let ((value (alist-get key rule-alist)))
-                                  (truncate-string-to-width
-                                   (format format-str (or value
-                                                          ""))
-                                   width
-                                   0 nil
-                                   t)))
-                              gpt-commit-annotation-spec-alist))))))
-    (completing-read "Select the type of change that you're committing:"
+                         (prefix (make-string (- max-len (length str)) ?\ ))
+                         (used-width)
+                         (res))
+                     (dotimes (i (length gpt-commit-annotation-spec-alist))
+                       (pcase-let* ((`(,key ,format-str ,width)
+                                     (nth i gpt-commit-annotation-spec-alist))
+                                    (value (alist-get key rule-alist))
+                                    (label))
+                         (if
+                             (< i (1- (length gpt-commit-annotation-spec-alist)))
+                             (setq used-width (+ (or used-width 0) width))
+                           (setq width (- (window-width) (+ used-width max-len) 10)))
+                         (setq label (if (> (string-width str) width)
+                                         (truncate-string-to-width
+                                          (format format-str (or value
+                                                                 ""))
+                                          width
+                                          0 nil
+                                          t)
+                                       (format format-str (or value
+                                                              ""))))
+                         (setq res (concat
+                                    (or res "")
+                                    (propertize " "
+                                                'display
+                                                (list 'space :align-to
+                                                      used-width))
+                                    label))))
+                     (concat prefix res)))))
+    (completing-read "Select the type of change that you're committing: "
                      (lambda (str pred action)
                        (if (eq action 'metadata)
                            `(metadata
                              (annotation-function . ,annotf))
                          (complete-with-action action alist str pred))))))
 
-(defun gpt-commit--retrieve-issue-key-from-branch ()
+(defun gpt-commit--retrieve-issue-key-from-branch (branch)
+  "Retrieve issue key from BRANCH."
+  (with-temp-buffer (insert branch)
+                    (when (re-search-backward
+                           "\\(^\\|[_/-]\\)\\(\\([a-z]+[-_][0-9]+\\)\\)\\($\\|[-_/]\\)"
+                           nil t 1)
+                      (match-string-no-properties 3))))
+
+
+(defun gpt-commit-retrieve-issue-key-from-branch ()
   "Retrieve jira issue from STR."
-  (let ((branch (magit-get-current-branch)))
-    (let ((re "[[:upper:]]+[-_][[:digit:]]+"))
-      (when (string-match-p re branch)
-        (replace-regexp-in-string
-         (concat ".*?\\(" re "\\).*")
-         "\\1"
-         branch)))))
+  (when-let ((branch (magit-get-current-branch)))
+    (gpt-commit--retrieve-issue-key-from-branch branch)))
 
 (defun gpt-commit-current-commit-type ()
   "Check and return the current commit type from the git commit message."
@@ -373,7 +484,7 @@ used."
 (defun gpt-commit-update-issue-key (issue-key)
   "Add or update the ISSUE-KEY from the current branch into the commit message."
   (interactive (list
-                (gpt-commit--retrieve-issue-key-from-branch)))
+                (gpt-commit-retrieve-issue-key-from-branch)))
   (when issue-key
     (let* ((msg (git-commit-buffer-message))
            (type-re (concat "^" (regexp-opt (mapcar #'car
@@ -436,30 +547,6 @@ used."
                (goto-char (point-min))
                (insert (format "%s: " new-type)))))))
 
-(defun gpt-commit--improve-message (msg callback)
-  "Improve a commit message MSG using GPT and pass it to the CALLBACK."
-  (let ((messages `[((role . "system")
-                     (content . ,gpt-commit-improve-system-prompt))
-                    ((role . "user")
-                     (content . ,msg))]))
-    (if (and gpt-commit-fallback-model
-             (not (equal gpt-commit-fallback-model gpt-commit-model-name)))
-        (gpt-commit-doc-gpt-request messages callback
-                                    (lambda (error-thrown data)
-                                      (message
-                                       "GPT %s Error: %s %s, retrying with %s"
-                                       gpt-commit-model-name
-                                       error-thrown data
-                                       gpt-commit-fallback-model)
-                                      (gpt-commit-doc-gpt-request
-                                       messages
-                                       callback
-                                       nil
-                                       gpt-commit-fallback-model))
-                                    gpt-commit-model-name)
-      (gpt-commit-doc-gpt-request messages callback
-                                  nil gpt-commit-model-name))))
-
 (defun gpt-commit-get-commit-msg-end ()
   "Find the end position of the commit message in a buffer."
   (save-excursion
@@ -505,23 +592,23 @@ Before using, set OpenAI API key
      (if prefix
          (substring-no-properties msg (length prefix))
        msg)
+     buffer
      (lambda (commit-message)
        (when commit-message
-         (with-current-buffer buffer
-           (goto-char (point-min))
-           (when prefix
-             (re-search-forward ":" nil t 1)
-             (if (looking-at "[\s\t]")
-                 (skip-chars-forward "\s\t")
-               (insert "\s")))
-           (delete-region (point)
-                          (gpt-commit-get-commit-msg-end))
-           (save-excursion
-             (insert (concat commit-message "\n\n")))
-           (downcase-word 1)
-           (goto-char (line-end-position))
-           (when (looking-at "\n[^\n#]")
-             (insert "\n"))))))))
+         (goto-char (point-min))
+         (when prefix
+           (re-search-forward ":" nil t 1)
+           (if (looking-at "[\s\t]")
+               (skip-chars-forward "\s\t")
+             (insert "\s")))
+         (delete-region (point)
+                        (gpt-commit-get-commit-msg-end))
+         (save-excursion
+           (insert (concat commit-message "\n\n")))
+         (downcase-word 1)
+         (goto-char (line-end-position))
+         (when (looking-at "\n[^\n#]")
+           (insert "\n")))))))
 
 ;;;###autoload
 (defun gpt-commit-message ()
@@ -546,33 +633,20 @@ and GPT model `gpt-commit-model-name'."
         (msg (git-commit-buffer-message)))
     (unless msg
       (setq msg (gpt-commit-read-type))
-      (insert msg (or (gpt-commit--retrieve-issue-key-from-branch) "") ":"))
+      (insert msg (or (gpt-commit-retrieve-issue-key-from-branch) "") ":"))
     (gpt-commit-generate-message
      msg
+     buffer
      (lambda (commit-message)
-       (when commit-message
-         (with-current-buffer buffer
-           (if (bobp)
-               (insert commit-message)
-             (replace-region-contents (point-min)
-                                      (point)
-                                      (lambda () commit-message)))))))))
+       (if (bobp)
+           (insert commit-message)
+         (replace-region-contents (point-min)
+                                  (point)
+                                  (lambda () commit-message)))))))
 
 ;;;###autoload (autoload 'gpt-commit-menu "gpt-commit" nil t)
 (transient-define-prefix gpt-commit-menu ()
-  "Offer a menu for git commit-related operations, including GPT-Commit options.
-
-The 'Cycle' category allows navigation through commit messages.
-
-The 'Commit Type' category includes a toggle, update, generate, and enhance
-operations for commit messages.
-
-The 'Issue Key' category allows inserting an issue key if one exists in the
-branch name.
-
-The 'Insert' category includes options for adding
-content to the commit message. The 'Do' category includes actions for saving,
-cancelling, and committing."
+  "Offer a menu for git commit-related operations, including GPT-Commit options."
   ["Cycle"
    ("p" "Previous message" git-commit-prev-message :transient t)
    ("n" "Next message" git-commit-next-message :transient t)]
@@ -615,10 +689,10 @@ cancelling, and committing."
     :inapt-if-not git-commit-buffer-message)]
   ["Issue Key"
    ("i" gpt-commit-update-issue-key
-    :inapt-if-not gpt-commit--retrieve-issue-key-from-branch
+    :inapt-if-not gpt-commit-retrieve-issue-key-from-branch
     :description (lambda ()
                    (concat "Insert issue key ("
-                           (or (gpt-commit--retrieve-issue-key-from-branch)
+                           (or (gpt-commit-retrieve-issue-key-from-branch)
                                "None")
                            ")")))]
   ["Insert"
