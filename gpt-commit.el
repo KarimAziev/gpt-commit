@@ -151,7 +151,7 @@ Can also be a function of no arguments that returns an API key (more secure)."
                                  (const :tag "" emoji)
                                  (string)))))
 
-(defcustom gpt-commit-annotation-spec-alist '((emoji "️%s" 15)
+(defcustom gpt-commit-annotation-spec-alist '((emoji " %s " 15)
                                               (description "%s" 80))
   "Alist of symbol, format string and width for displaying commit type."
   :group 'gpt-commit
