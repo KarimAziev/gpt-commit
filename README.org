@@ -4,12 +4,11 @@
 
 This fork of =gpt-commit= aims to extend the original version with several custom features, including:
 
-- Streaming responses (requires Curl) as they are received instead of waiting the full response.
-- Options to customize models - the primary (by default it is =gpt-4-1106-preview=) and prompts.
-- Utilize GPT to not only generate but also improve commit messages.
+- Streaming responses (requires Curl) as they are received instead of waiting for the full response.
+- Options to customize model (by default, it is =gpt-4-1106-preview=) and prompts.
+- Utilizing GPT to not only generate but also to improve commit messages.
 - Option to specify commit types.
-- Detailed transient menu to interact with and manipulate commit messages, with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue key, and more.
-
+- Detailed transient menu to interact with and manipulate commit messages with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue keys, and more.
   [[./gpt-commit-demo.gif][./gpt-commit-demo.gif]]
 
 * Table of Contents                                          :TOC_2_gh:QUOTE:
@@ -69,17 +68,16 @@ Set your OpenAI API key and preferred GPT model:
 
 
 * Usage
-
 **** ~M-x gpt-commit-menu~
-Detailed transient menu to interact with and manipulate commit messages, with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue key, and more.
+A detailed transient menu to interact with and manipulate commit messages with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue keys, and more.
 
 **** ~M-x gpt-commit-message~
-This comman analyzes both the changes and the current commit message, then generates a conventional commit message using the primary model. If the primary model fails, it uses the fallback one.
+This command analyzes both the changes and the current commit message, then generates a conventional commit message using the primary model. If the primary model fails, it uses the fallback one.
 
 **** ~M-x gpt-commit-improve-message~
-Analyze and generate an improved commit message using GPT-Commit.
+Analyze an existing commit message to generate an improved version using GPT-Commit.
 
-Unlike ~gpt-commit-message~, this command does not send the git diff output, but focuses solely on the current commit message.
+Unlike ~gpt-commit-message~, this command does not send the git diff output but focuses solely on the current commit message.
 
 
 * Commands
