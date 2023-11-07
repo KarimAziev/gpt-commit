@@ -9,7 +9,8 @@ This fork of =gpt-commit= aims to extend the original version with several custo
 - Utilizing GPT to not only generate but also to improve commit messages.
 - Option to specify commit types.
 - Detailed transient menu to interact with and manipulate commit messages with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue keys, and more.
-  [[./gpt-commit-demo.gif][./gpt-commit-demo.gif]]
+
+  [[./gpt-commit.gif][./gpt-commit.gif]]
 
 * Table of Contents                                          :TOC_2_gh:QUOTE:
 #+BEGIN_QUOTE
