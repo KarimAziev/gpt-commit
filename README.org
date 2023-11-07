@@ -4,31 +4,22 @@
 
 This fork of =gpt-commit= aims to extend the original version with several custom features, including:
 
-- Options to customize models - the primary (by default it is =gpt-4=) and fallback (by default it is =gpt-3.5-turbo-16k=), as well as their system prompts.
+- Streaming responses (requires Curl) as they are received instead of waiting the full response.
+- Options to customize models - the primary (by default it is =gpt-4-1106-preview=) and prompts.
 - Utilize GPT to not only generate but also improve commit messages.
 - Option to specify commit types.
 - Detailed transient menu to interact with and manipulate commit messages, with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue key, and more.
 
-
-* Table of Contents                                       :TOC_2_gh:QUOTE:
+* Table of Contents                                          :TOC_2_gh:QUOTE:
 #+BEGIN_QUOTE
 - [[#about][About]]
-- [[#requirements][Requirements]]
 - [[#installation][Installation]]
   - [[#with-use-package-and-straightel][With use-package and straight.el]]
   - [[#manual-installation][Manual installation]]
 - [[#usage][Usage]]
-  - [[#customization][Customization]]
+- [[#commands][Commands]]
+- [[#customization][Customization]]
 #+END_QUOTE
-
-* Requirements
-
-| Name        | Version |
-|-------------+---------|
-| Emacs       |    28.1 |
-| ~magit~     |   3.3.0 |
-| ~transient~ |   0.4.1 |
-
 
 * Installation
 
@@ -46,12 +37,15 @@ This fork of =gpt-commit= aims to extend the original version with several custo
              gpt-commit-improve-message
              gpt-commit-update-commit-type
              gpt-commit-update-issue-key
-             gpt-commit-toggle-commit-type))
+             gpt-commit-toggle-commit-type)
+  :config
+  (setq gpt-commit-api-key "YOUR_OPENAI_API_KEY")
+  (setq gpt-commit-model "gpt-4"))
 #+end_src
 
 ** Manual installation
 
-Download the source code and put it wherever you like, e.g. into =~/.emacs.d/gpt-commit/=
+Ensure Emacs 28.1, Magit 3.3.0, and transient 0.4.1 are installed. Download the source code and put it wherever you like, e.g. into =~/.emacs.d/gpt-commit/=
 
 #+begin_src shell :eval no
 git clone https://github.com/KarimAziev/gpt-commit.git ~/.emacs.d/gpt-commit/
@@ -64,28 +58,64 @@ Add the downloaded directory to the load path:
 (require 'gpt-commit)
 #+end_src
 
+Set your OpenAI API key and preferred GPT model:
+
+#+begin_src elisp
+(setq gpt-commit-api-key "YOUR_OPENAI_API_KEY")
+(setq gpt-commit-model "gpt-4")
+#+end_src
+
+
 * Usage
 
-Run in =git-commit-mode=:
-
 **** ~M-x gpt-commit-menu~
-
 Detailed transient menu to interact with and manipulate commit messages, with options like toggling between different commit types, enhancing commit messages using GPT, inserting issue key, and more.
 
 **** ~M-x gpt-commit-message~
-
 This comman analyzes both the changes and the current commit message, then generates a conventional commit message using the primary model. If the primary model fails, it uses the fallback one.
 
 **** ~M-x gpt-commit-improve-message~
-
 Analyze and generate an improved commit message using GPT-Commit.
 
 Unlike ~gpt-commit-message~, this command does not send the git diff output, but focuses solely on the current commit message.
 
 
-** Customization
-- =gpt-commit-model-name= to set the primary model
-- =gpt-commit-fallback-model= for the fallback model
-- =gpt-commit-system-prompt-en= allows modification of the system prompt in =gpt-commit-message= command
-- =gpt-commit-improve-system-prompt= allows modification of the system prompt in =gpt-commit-improve-message= command
-- =gpt-commit-types-alist= specifies available commit types
+* Commands
+   
+- =gpt-commit-message=: Generate a complete Git commit message.
+- =gpt-commit-improve-message=: Enhance an existing commit message.
+- =gpt-commit-menu=: Open a transient menu for Git commit operations.
+- =gpt-commit-toggle-commit-type=: Cycle between commit types defined in =gpt-commit-types-alist=.
+- =gpt-commit-update-issue-key=: Update the issue key in your commit message from the current branch.
+- =gpt-commit-update-commit-type=: Change commit type in your commit message.
+- =gpt-commit-stream-abort=: Abort a running GPT commit-stream.
+
+
+* Customization
+**** ~gpt-commit-system-prompt-en~
+Prompt (directive) for =gpt-commit= to generate commit message.
+**** ~gpt-commit-improve-system-prompt~
+Prompt (directive) for =gpt-commit= to improve commit message.
+
+**** ~gpt-commit-pre-response-hook~
+Functions to run before the inserting response from the =gpt= request. This hook runs without any arguments. Note that the order in which functions are added to the hook determines the order in which they are called. The most recently added function is called first.
+**** ~gpt-commit-post-response-hook~
+Functions to run after the whole stream response finished and inserted. The functions attached to this hook will be called with no arguments. They should perform operations based on the state of the program at the time they are called. Note that the order in which functions are added to the hook determines the order in which they are called. The most recently added function is called first.
+**** ~gpt-commit-gpt-temperature~
+The randomness of the =gpt= model's output. =a= higher value increases the randomness, while a lower value makes the output more deterministic. It should be a floating-point number between 0.0 and 2.0.
+**** ~gpt-commit-api-key~
+The API key for gpt service as a string or a function that returns the API key. If it is a function, it will be called without arguments and should return the API key for the gpt commit service when called.
+**** ~gpt-commit-model~
+The model to use for =gpt= requests. The effectiveness of commit message generation depends on the chosen model. Different models may produce different results.
+**** ~gpt-commit-api-url~
+The =url= for the OpenAI =api= endpoint to use for =gpt= chat completions.
+**** ~gpt-commit-use-stream~
+Whether to use =curl= for streaming.
+
+**** ~gpt-commit-types-alist~
+=a= key-value-alist of commit types.
+**** ~gpt-commit-annotation-spec-alist~
+Alist of symbol, format string and width for displaying commit type.
+   
+
+
