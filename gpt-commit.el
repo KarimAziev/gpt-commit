@@ -405,7 +405,7 @@ position, tracking marker, transformer function, and inserter function."
   (let ((start-marker (plist-get info :position))
         (tracking-marker (plist-get info :tracking-marker))
         (transformer (plist-get info :transformer))
-        (insert-fn (or (plist-get info :inserter) #'gpt-commit-insert-with-fill))
+        (insert-fn (or (plist-get info :inserter) #'insert))
         (first-completion))
     (when response
       (with-current-buffer (marker-buffer start-marker)
