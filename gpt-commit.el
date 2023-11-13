@@ -444,24 +444,24 @@ string and sent as part of the HTTP request body.
 
 Argument TOKEN is a string that will be used to format a curl command argument."
   (require 'json)
-  (append
-   (list "--location" "--silent" "--compressed" "--disable"
-         (format "-X%s" "POST")
-         (format "-w(%s . %%{size_header})" token)
-         (format "-m%s" 60)
-         "-D-"
-         (format "-d%s" (encode-coding-string
-                         (let ((json-object-type 'plist))
-                           (json-encode
-                            request-data))
-                         'utf-8)))
-   (seq-map (lambda (header)
-              (format "-H%s: %s" (car header)
-                      (cdr header)))
-            `(("Content-Type" . "application/json")
-              ("Authorization" . ,(concat "Bearer "
-                                          (gpt-commit--api-key)))))
-   (list gpt-commit-api-url)))
+  (let* ((data (encode-coding-string
+                (json-encode request-data)
+                'utf-8))
+         (data-file (make-temp-file "gpt-commit-curl-data" nil ".json" data)))
+    (append
+     (list "--location" "--silent" "--compressed" "--disable"
+           (format "-X%s" "POST")
+           (format "-w(%s . %%{size_header})" token)
+           (format "-m%s" 60)
+           "-D-"
+           "--data-binary" (format "@%s" data-file))
+     (seq-map (lambda (header)
+                (format "-H%s: %s" (car header)
+                        (cdr header)))
+              `(("Content-Type" . "application/json")
+                ("Authorization" . ,(concat "Bearer "
+                                            (gpt-commit--api-key)))))
+     (list gpt-commit-api-url))))
 
 (defun gpt-commit-stream-request (system-prompt user-prompt &optional buffer
                                                 position)
