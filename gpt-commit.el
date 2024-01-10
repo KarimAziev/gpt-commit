@@ -4,9 +4,10 @@
 ;;         Karim Aziiev <karim.aziiev@gmail.com>
 ;; URL: https://github.com/KarimAziev/gpt-commit
 ;; Package-Version: 0.0.2
-;; Package-Requires: ((emacs "28.1") (magit "3.3.0") (transient "0.4.1"))
+;; Package-Requires: ((emacs "29.1") (magit "3.3.0") (transient "0.5.3"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Keywords: convenience
+;; Version: 0.1.0
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
