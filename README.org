@@ -4,7 +4,7 @@
 
 This fork of =gpt-commit= aims to extend the original version with several custom features, including:
 
-- Streaming responses (requires Curl) as they are received instead of waiting for the full response.
+- Streaming responses as they are received instead of waiting for the full response.
 - Options to customize model (by default, it is =gpt-4-1106-preview=) and prompts.
 - Utilizing GPT to not only generate but also to improve commit messages.
 - Option to specify commit types.
@@ -28,21 +28,13 @@ This fork of =gpt-commit= aims to extend the original version with several custo
 ** With use-package and straight.el
 #+begin_src elisp :eval no
 (use-package gpt-commit
-  :straight (gpt-commit
-             :repo "KarimAziev/gpt-commit"
-             :type git
-             :branch "master"
+  :straight (:type git
              :flavor nil
-             :host github)
-  :commands (gpt-commit-menu
-             gpt-commit-message
-             gpt-commit-improve-message
-             gpt-commit-update-commit-type
-             gpt-commit-update-issue-key
-             gpt-commit-toggle-commit-type)
+             :host github
+             :fork "KarimAziev/gpt-commit")
   :config
   (setq gpt-commit-api-key "YOUR_OPENAI_API_KEY")
-  (setq gpt-commit-model "gpt-4"))
+  (setq gpt-commit-model "gpt-4-1106-preview"))
 #+end_src
 
 ** Manual installation
@@ -64,7 +56,7 @@ Set your OpenAI API key and preferred GPT model:
 
 #+begin_src elisp
 (setq gpt-commit-api-key "YOUR_OPENAI_API_KEY")
-(setq gpt-commit-model "gpt-4")
+(setq gpt-commit-model "gpt-4-1106-preview")
 #+end_src
 
 
@@ -82,7 +74,7 @@ Unlike ~gpt-commit-message~, this command does not send the git diff output but 
 
 
 * Commands
-   
+
 - =gpt-commit-message=: Generate a complete Git commit message.
 - =gpt-commit-improve-message=: Enhance an existing commit message.
 - =gpt-commit-menu=: Open a transient menu for Git commit operations.
@@ -94,7 +86,11 @@ Unlike ~gpt-commit-message~, this command does not send the git diff output but 
 
 * Customization
 **** ~gpt-commit-system-prompt-en~
-Prompt (directive) for =gpt-commit= to generate commit message.
+Default prompt (directive) for =gpt-commit= to generate commit message.
+
+**** ~gpt-commit-system-prompts~
+List of the system prompts that can be changed dynamically in ~gpt-commit-menu~.
+
 **** ~gpt-commit-improve-system-prompt~
 Prompt (directive) for =gpt-commit= to improve commit message.
 
@@ -117,6 +113,6 @@ Whether to use =curl= for streaming.
 =a= key-value-alist of commit types.
 **** ~gpt-commit-annotation-spec-alist~
 Alist of symbol, format string and width for displaying commit type.
-   
+
 
 
