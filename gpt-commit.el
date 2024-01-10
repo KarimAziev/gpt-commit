@@ -116,9 +116,27 @@
                        (string :tag "Column Name" "%s")
                        (integer :tag "Column Width" 20))))
 
-(defcustom gpt-commit-use-stream (and (executable-find "curl")
-                                      t)
-  "Whether to use `curl' for streaming."
+(defcustom gpt-commit-use-stream t
+  "Flag to use streaming for GPT commit message generation.
+
+Determines whether to use streaming for GPT commit message generation.
+
+When non-nil, streaming is enabled, allowing for incremental output as the GPT
+model generates the commit message. This can be useful for large requests or
+when immediate feedback is desired.
+
+To abort a streaming request, use the command `gpt-commit-stream-abort'.
+
+The default value is t, meaning streaming is enabled by default.
+
+When set to nil, streaming is disabled, and the commit message will only be
+displayed once fully generated.
+
+This setting is applicable to functions like `gpt-commit-improve-message' and
+`gpt-commit-message' that rely on GPT model responses.
+
+Toggle this setting to switch between streaming and non-streaming modes as
+needed."
   :group 'gpt-commit
   :type 'boolean)
 
@@ -133,6 +151,27 @@
   :type 'string
   :group 'gpt-commit)
 
+
+(defcustom gpt-commit-system-prompts '("Based on the user-supplied incomplete or empty commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message accurately encompassing the changes. Ensure that your response strictly contains the refined commit message, without including any extraneous information. Fill text lines to be no longer than 70, don't wrap in any quotes."
+                                       "Using the output from `git diff --cached` and any user-provided partial commit message, your task is to create a concise commit summary starting with a scope (e.g., feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert). The summary should not exceed 70 characters and must encapsulate the primary change or intent of the commit succinctly. Don't wrap summary in any quotes. Provide only the summary, excluding any additional information or detailed description. ")
+  "List of strings for GPT-based commit message generation.
+
+A list of system prompts used to guide the generation of commit messages with
+the help of a GPT model. Each prompt is a string that instructs the GPT model on
+how to process the `git diff --cached` output and any partial commit message
+provided by the user to create a complete and conventional commit message.
+
+Each prompt should be crafted to provide clear and concise instructions to the
+GPT model, ensuring that the generated commit message is relevant and adheres to
+conventional commit standards. The prompts should not include any extraneous
+information and should be formatted to fit within a 70-character width limit.
+
+To use these prompts, select one from the list as the active prompt when
+invoking the commit message generation function. The selected prompt will be
+sent to the GPT model along with the `git diff --cached` output and any
+user-provided commit message fragment to generate a complete commit message."
+  :type '(repeat string)
+  :group 'gpt-commit)
 
 
 (defcustom gpt-commit-api-url "https://api.openai.com/v1/chat/completions"
@@ -158,6 +197,8 @@ chosen model. Different models may produce different results."
           (const "gpt-3.5-turbo-0301")
           (const "gpt-3.5-turbo")
           (string "other")))
+
+(defvar gpt-commit-curr-prompt-idx 0)
 
 (defcustom gpt-commit-api-key ""
   "API key for GPT service as a string or a function that returns the API key.
@@ -201,11 +242,6 @@ order in which they are called. The most recently added function is called
 first."
   :group 'gpt-commit
   :type 'hook)
-
-(defvar gpt-commit--process-alist nil
-  "Alist of active curl requests.")
-
-(defvar gpt-commit--debug nil)
 
 (declare-function json-read "json")
 (declare-function json-encode "json")
@@ -255,164 +291,7 @@ represent a JSON false value.  It defaults to `:false'."
           (json-false (or false-object :false)))
       (json-read))))
 
-(defun gpt-commit--stream-sentinel (process _status)
-  "Handle PROCESS completion and update buffers.
 
-Argument PROCESS is the subprocess associated with the sentinel.
-
-Argument _STATUS is a string representing the change in the PROCESS's state."
-  (let ((proc-buf (process-buffer process)))
-    (when gpt-commit--debug
-      (with-current-buffer proc-buf
-        (clone-buffer "*gpt-doc-error*" 'show)))
-    (let* ((info (alist-get process gpt-commit--process-alist))
-           (gpt-doc-buffer (plist-get info :buffer))
-           (tracking-marker (plist-get info :tracking-marker))
-           (start-marker (plist-get info :position))
-           (http-status (plist-get info :http-status))
-           (http-msg (plist-get info :status)))
-      (if (equal http-status "200")
-          (with-current-buffer (marker-buffer start-marker)
-            (pulse-momentary-highlight-region (+ start-marker 2)
-                                              tracking-marker))
-        (with-current-buffer proc-buf
-          (goto-char (point-max))
-          (search-backward (plist-get info :token))
-          (backward-char)
-          (pcase-let*
-              ((`(,_ . ,header-size)
-                (read (current-buffer)))
-               (response
-                (progn (goto-char header-size)
-                       (condition-case nil (gpt-commit-json-read-buffer 'plist)
-                         (json-readtable-error 'json-read-error)))))
-            (cond
-             ((plist-get response :error)
-              (let* ((error-plist (plist-get response :error))
-                     (error-msg (plist-get error-plist :message))
-                     (error-type (plist-get error-plist :type)))
-                (message "GPT-commit error: (%s) %s" http-msg error-msg)
-                (setq http-msg (concat "("  http-msg ") " (string-trim error-type)))))
-             ((eq response 'json-read-error)
-              (message "GPT-commit error (%s): Malformed JSON in response."
-                       http-msg))
-             (t (message "GPT-commit error (%s): Could not parse HTTP response."
-                         http-msg)))))
-        (message (format " Response Error: %s" http-msg)))
-      (with-current-buffer gpt-doc-buffer
-        (message "gpt-commit-post-response-hook")
-        (run-hooks 'gpt-commit-post-response-hook)))
-    (setf (alist-get process gpt-commit--process-alist nil 'remove) nil)
-    (kill-buffer proc-buf)))
-
-
-(defun gpt-commit--stream-filter (process output)
-  "Insert HTTP response data into a buffer at a specified position.
-
-Argument PROCESS is the process that generates the output.
-
-Argument OUTPUT is the output generated by the process."
-  (let* ((proc-info (alist-get process gpt-commit--process-alist)))
-    (with-current-buffer (process-buffer process)
-      (save-excursion
-        (goto-char (process-mark process))
-        (insert output)
-        (set-marker (process-mark process)
-                    (point)))
-      (unless (plist-get proc-info :http-status)
-        (save-excursion
-          (goto-char (point-min))
-          (when-let* (((not (= (line-end-position)
-                               (point-max))))
-                      (http-msg (buffer-substring (line-beginning-position)
-                                                  (line-end-position)))
-                      (http-status
-                       (save-match-data
-                         (and (string-match "HTTP/[.0-9]+ +\\([0-9]+\\)"
-                                            http-msg)
-                              (match-string 1 http-msg)))))
-            (plist-put proc-info :http-status http-status)
-            (plist-put proc-info :status (string-trim http-msg))))
-        (when (with-current-buffer (plist-get proc-info :buffer)
-                (or buffer-read-only
-                    (get-char-property (plist-get proc-info :position)
-                                       'read-only)))
-          (message
-           "Buffer is read only, displaying reply in buffer \"*GPT-DOC response*\"")
-          (display-buffer
-           (with-current-buffer (get-buffer-create "*GPT-DOC response*")
-             (goto-char (point-max))
-             (move-marker (plist-get proc-info :position)
-                          (point)
-                          (current-buffer))
-             (current-buffer))
-           '((display-buffer-reuse-window
-              display-buffer-pop-up-window)
-             (reusable-frames . visible))))
-        (let ((status (plist-get proc-info :http-status))
-              (position (plist-get proc-info :position)))
-          (when (and (equal status "200"))
-            (with-current-buffer (marker-buffer position)
-              (run-hooks 'gpt-commit-pre-response-hook)))))
-      (when-let ((http-msg (plist-get proc-info :status))
-                 (http-status (plist-get proc-info :http-status)))
-        (when (equal http-status "200")
-          (funcall (or (plist-get proc-info :callback)
-                       #'gpt-commit--stream-insert-response)
-                   (let* ((json-object-type 'plist)
-                          (content-strs))
-                     (condition-case nil
-                         (while (re-search-forward "^data:" nil t)
-                           (save-match-data
-                             (unless (looking-at " *\\[DONE\\]")
-                               (when-let* ((response (gpt-commit-json-read-buffer
-                                                      'plist))
-                                           (delta
-                                            (plist-get (elt
-                                                        (plist-get response
-                                                                   :choices)
-                                                        0)
-                                                       :delta))
-                                           (content (plist-get delta :content)))
-                                 (push content content-strs)))))
-                       (error
-                        (goto-char (match-beginning 0))))
-                     (apply #'concat (nreverse content-strs)))
-                   proc-info))))))
-
-(defun gpt-commit--stream-insert-response (response info)
-  "Insert RESPONSE into the buffer associated with start-marker in INFO.
-
-Argument RESPONSE is a string containing the server's response to be inserted
-into the buffer.
-
-Argument INFO is a property list containing insertion information such as
-position, tracking marker, transformer function, and inserter function."
-  (let ((start-marker (plist-get info :position))
-        (tracking-marker (plist-get info :tracking-marker))
-        (transformer (plist-get info :transformer))
-        (insert-fn (or (plist-get info :inserter) #'insert))
-        (first-completion))
-    (when response
-      (with-current-buffer (marker-buffer start-marker)
-        (save-excursion
-          (unless tracking-marker
-            (setq first-completion t)
-            (goto-char start-marker)
-            (setq tracking-marker (set-marker (make-marker) (point)))
-            (set-marker-insertion-type tracking-marker t)
-            (plist-put info :tracking-marker tracking-marker))
-          (put-text-property 0 (length response) 'gpt-commit 'response response)
-          (goto-char tracking-marker)
-          (when transformer
-            (setq response (funcall transformer response)))
-          (when first-completion
-            (let ((msg (gpt-commit-buffer-message)))
-              (if (and msg (string-prefix-p msg response))
-                  (setq response (substring response (length msg)))
-                (delete-region (point-min)
-                               (point)))))
-          (funcall insert-fn response))))))
 
 (defun gpt-commit--api-key ()
   "Retrieve the OpenAI API key, either directly or from a function."
@@ -422,87 +301,597 @@ position, tracking marker, transformer function, and inserter function."
        gpt-commit-api-key)
     gpt-commit-api-key))
 
-(defun gpt-commit--get-curl-stream-args (request-data token)
-  "Generate curl arguments for streaming a POST request with given data and TOKEN.
+(defvar json-object-type)
+(defvar json-array-type)
+(defvar json-false)
+(defvar json-null)
+(defvar url-request-method)
+(defvar url-request-data)
+(defvar url-request-extra-headers)
+(defvar url-http-end-of-headers)
 
-Argument REQUEST-DATA is a data structure that will be converted to a JSON
-string and sent as part of the HTTP request body.
+(declare-function json-encode "json")
+(declare-function json-read "json")
+(declare-function json-read-from-string "json")
+(declare-function url-host "url-parse")
+(declare-function auth-source-search "auth-source")
 
-Argument TOKEN is a string that will be used to format a curl command argument."
-  (require 'json)
-  (let* ((data (encode-coding-string
-                (json-encode request-data)
-                'utf-8))
-         (data-file (make-temp-file "gpt-commit-curl-data" nil ".json" data)))
-    (append
-     (list "--location" "--silent" "--compressed" "--disable"
-           (format "-X%s" "POST")
-           (format "-w(%s . %%{size_header})" token)
-           (format "-m%s" 60)
-           "-D-"
-           "--data-binary" (format "@%s" data-file))
-     (seq-map (lambda (header)
-                (format "-H%s: %s" (car header)
-                        (cdr header)))
-              `(("Content-Type" . "application/json")
-                ("Authorization" . ,(concat "Bearer "
-                                            (gpt-commit--api-key)))))
-     (list gpt-commit-api-url))))
+(defcustom gpt-commit-abort-on-keyboard-quit-count 3
+  "Number of `keyboard-quit' presses before aborting GPT documentation requests.
 
-(defun gpt-commit-stream-request (system-prompt user-prompt &optional buffer
-                                                position)
-  "Send a streaming request to the GPT API and handle the response.
+Determines the number of consecutive `keyboard-quit' commands needed to abort an
+active streaming request.
 
-Argument SYSTEM-PROMPT is a string that represents the system's prompt.
+The default value is 3, meaning that pressing `keyboard-quit' three times in
+quick succession will abort the request.
 
-Argument USER-PROMPT is a string that represents the user's prompt.
+This variable is only effective when `gpt-commit-use-stream' is non-nil, as
+it applies to streaming requests.
 
-Optional argument BUFFER is the buffer where the request will be committed. If
-not provided, the current BUFFER is used.
+If the number of `keyboard-quit' commands does not reach the set threshold, the
+abort action will not be triggered."
+  :group 'gpt-commit
+  :type 'integer)
 
-Optional argument POSITION is the position in the BUFFER where the request will
-be committed. It can be a marker or an integer. If not provided, the point
-marker or the end of the region (if a region is active) is used."
+(defcustom gpt-commit-debug nil
+  "Whether to enable debugging in the GPT documentation group."
+  :group 'gpt-commit
+  :type 'boolean)
+
+
+(defcustom gpt-commit-api-key 'gpt-commit-api-key-from-auth-source
+  "An OpenAI API key (string).
+
+Can also be a function of no arguments that returns an API
+key (more secure)."
+  :group 'gpt-commit
+  :type '(radio
+          (string :tag "API key")
+          (function-item gpt-commit-api-key-from-auth-source)
+          (function :tag "Function that returns the API key")))
+
+(defcustom gpt-commit-gpt-url "https://api.openai.com/v1/chat/completions"
+  "The URL to the OpenAI GPT API endpoint for chat completions."
+  :group 'gpt-commit
+  :type 'string)
+
+(defcustom gpt-commit-gpt-model "gpt-4-1106-preview"
+  "A string variable representing the API model for OpenAI."
+  :group 'gpt-commit
+  :type 'string)
+
+(defcustom gpt-commit-gpt-temperature 0.1
+  "The temperature for the OpenAI GPT model used.
+
+This is a number between 0.0 and 2.0 that controls the randomness
+of the response, with 2.0 being the most random.
+
+The temperature controls the randomness of the output generated by the model. A
+lower temperature results in more deterministic and less random completions,
+while a higher temperature produces more diverse and random completions.
+
+To adjust the temperature, set the value to the desired level. For example, to
+make the model's output more deterministic, reduce the value closer to 0.1.
+Conversely, to increase randomness, raise the value closer to 1.0."
+  :group 'gpt-commit
+  :type 'number)
+
+
+(defvar gpt-commit--request-url-buffers nil
+  "Alist of active request buffers requests.")
+
+(defvar gpt-commit--debug-data-raw nil
+  "Stores raw data for debugging purposes.")
+
+(defvar auth-sources)
+
+(defun gpt-commit-api-key-from-auth-source (&optional url)
+  "Return the fist API key from the auth source for URL.
+By default, the value of `gpt-commit-gpt-url' is used as URL."
+  (require 'auth-source)
+  (require 'url-parse)
+  (let* ((host
+          (url-host (url-generic-parse-url (or url gpt-commit-gpt-url))))
+         (secret (plist-get (car (auth-source-search
+                                  :host host))
+                            :secret)))
+    (pcase secret
+      ((pred not)
+       (user-error (format "No `gpt-commit-api-key' found in the auth source.
+Your auth-sources %s should contain such entry:
+machine %s password TOKEN" auth-sources host)))
+      ((pred functionp)
+       (encode-coding-string (funcall secret) 'utf-8))
+      (_ secret))))
+
+(defun gpt-commit-get-api-key ()
+  "Return the value of `gpt-commit-api-key' if it is a function.
+If it is a string, prompt the user for a key, save it, and renturn the key.
+If `gpt-commit-api-key' is not set, raise an error."
+  (pcase gpt-commit-api-key
+    ((pred functionp)
+     (funcall gpt-commit-api-key))
+    ((pred stringp)
+     (while (string-empty-p gpt-commit-api-key)
+       (let ((key (read-string "GPT Api Key: ")))
+         (customize-set-value 'gpt-commit-api-key key)
+         (when (yes-or-no-p "Save this key?")
+           (customize-save-variable 'gpt-commit-api-key key))))
+     gpt-commit-api-key)
+    (_ (error "`gpt-commit-api-key' is not set"))))
+
+
+(defun gpt-commit--json-parse-string (str &optional object-type array-type
+                                null-object false-object)
+  "Parse STR with natively compiled function or with json library.
+
+The argument OBJECT-TYPE specifies which Lisp type is used
+to represent objects; it can be `hash-table', `alist' or `plist'.  It
+defaults to `alist'.
+
+The argument ARRAY-TYPE specifies which Lisp type is used
+to represent arrays; `array'/`vector' and `list'.
+
+The argument NULL-OBJECT specifies which object to use
+to represent a JSON null value.  It defaults to `:null'.
+
+The argument FALSE-OBJECT specifies which object to use to
+represent a JSON false value.  It defaults to `:false'."
+  (if (and (fboundp 'json-parse-string)
+           (fboundp 'json-available-p)
+           (json-available-p))
+      (json-parse-string str
+                         :object-type (or object-type 'alist)
+                         :array-type
+                         (pcase array-type
+                           ('list 'list)
+                           ('vector 'array)
+                           (_ 'array))
+                         :null-object (or null-object :null)
+                         :false-object (or false-object :false))
+    (require 'json)
+    (let ((json-object-type (or object-type 'alist))
+          (json-array-type
+           (pcase array-type
+             ('list 'list)
+             ('array 'vector)
+             (_ 'vector)))
+          (json-null (or null-object :null))
+          (json-false (or false-object :false)))
+      (json-read-from-string str))))
+
+
+(defun gpt-commit--abort-all ()
+  "Cancel all pending GPT document requests."
+  (gpt-commit--abort-by-url-buffer t))
+
+(defun gpt-commit-abort-all ()
+  "Terminate the process associated with a buffer BUFF and delete its buffer.
+
+Argument BUFF is the buffer in which the process to be aborted is running."
+  (interactive)
+  (gpt-commit--abort-all))
+
+(defun gpt-commit-restore-text-props ()
+  "Restore old text properties after removing `gpt-commit' props."
+  (pcase-let* ((`(,beg . ,end)
+                (gpt-commit--property-boundaries 'gpt-commit-old))
+               (value (and beg
+                           (get-text-property beg 'gpt-commit-old))))
+    (when (and beg end)
+      (remove-text-properties beg end '(gpt-commit t gpt-old-doc t)))
+    (when beg
+      (goto-char beg)
+      (delete-region beg end)
+      (when (stringp value)
+        (insert value)))))
+
+(defun gpt-commit-goto-char (position)
+  "Jump to POSITION in all windows displaying the buffer.
+
+Argument POSITION is the buffer position to go to."
+  (goto-char position)
+  (dolist (wnd (get-buffer-window-list (current-buffer) nil t))
+    (set-window-point wnd position)))
+
+(defun gpt-commit-abort-buffer (buffer)
+  "Cancel ongoing URL request for buffer.
+
+Argument BUFFER is the buffer associated with a request to be aborted."
+  (pcase-dolist (`(,req-buff . ,marker) gpt-commit--request-url-buffers)
+    (let ((buff
+           (when (markerp marker)
+             (marker-buffer marker))))
+      (when (eq buffer buff)
+        (gpt-commit--abort-by-url-buffer req-buff)))))
+
+(defun gpt-commit--property-boundaries (prop &optional pos)
+  "Return boundaries of property PROP at POS (cdr is 1+)."
+  (unless pos (setq pos (point)))
+  (let (beg end val)
+    (setq val (get-text-property pos prop))
+    (if (null val)
+        val
+      (if (or (bobp)
+              (not (eq (get-text-property (1- pos) prop) val)))
+          (setq beg pos)
+        (setq beg (previous-single-property-change pos prop))
+        (when (null beg)
+          (setq beg (point-min))))
+      (if (or (eobp)
+              (not (eq (get-text-property (1+ pos) prop) val)))
+          (setq end pos)
+        (setq end (next-single-property-change pos prop))
+        (when (null end)
+          (setq end (point-min))))
+      (cons beg end))))
+
+(defun gpt-commit-remove-text-props ()
+  "Strip `gpt-commit' text properties from a document region."
+  (pcase-let ((`(,beg . ,end)
+               (gpt-commit--property-boundaries 'gpt-commit)))
+    (when (and beg end)
+      (remove-text-properties beg end '(gpt-commit t gpt-old-doc t)))))
+
+
+(defun gpt-commit-abort-current-buffer ()
+  "Cancel processing in the active buffer."
+  (let ((buff (current-buffer)))
+    (gpt-commit-abort-buffer buff)))
+
+(defun gpt-commit--abort-by-url-buffer (url-buff)
+  "Cancel ongoing URL fetch and close buffer.
+
+Argument URL-BUFF is the buffer associated with the URL retrieval process to be
+aborted."
+  (pcase-dolist (`(,req-buff . ,marker) gpt-commit--request-url-buffers)
+    (when (or (eq url-buff t)
+              (eq req-buff url-buff))
+      (when (buffer-live-p req-buff)
+        (let ((proc (get-buffer-process req-buff)))
+          (when proc
+            (delete-process proc))
+          (kill-buffer req-buff))))
+    (gpt-commit--abort-by-marker marker))
+  (setq gpt-commit--request-url-buffers
+        (if (eq url-buff t)
+            nil
+          (assq-delete-all url-buff gpt-commit--request-url-buffers)))
+  (when (symbol-value 'gpt-commit-abort-mode)
+    (gpt-commit-abort-mode -1)))
+
+(defun gpt-commit--retrieve-error (status)
+  "Extract and format error details from STATUS.
+
+Argument STATUS is a plist containing the status of the HTTP request."
+  (pcase-let*
+      ((status-error (plist-get status :error))
+       (`(_err ,type ,code) status-error)
+       (description
+        (and status-error
+             (progn
+               (when (and (boundp
+                           'url-http-end-of-headers)
+                          url-http-end-of-headers)
+                 (goto-char url-http-end-of-headers))
+               (when-let ((err (ignore-errors
+                                 (cdr-safe
+                                  (assq 'error
+                                        (gpt-commit-json-read-buffer
+                                         'alist))))))
+                 (or (cdr-safe (assq 'message err)) err))))))
+    (when status-error
+      (let* ((prefix (if (facep 'error)
+                         (propertize
+                          "gpt-commit error"
+                          'face
+                          'error)
+                       "gpt-commit error"))
+             (details (delq nil
+                            (list
+                             (when type  (format "%s request failed" type))
+                             (when code (format "with status %s" code))
+                             (when description (format "- %s" description))))))
+        (if details
+            (concat prefix ": "
+                    (string-join
+                     details
+                     " "))
+          prefix)))))
+
+(defun gpt-commit--get-response-content (response)
+  "Retrieve and decode content from a RESPONSE object.
+
+Argument RESPONSE is a plist containing the API response data."
+  (when-let* ((choices (plist-get response
+                                  :choices))
+              (choice (elt choices 0))
+              (delta (plist-get choice :delta))
+              (content (plist-get delta :content)))
+    (decode-coding-string content 'utf-8)))
+
+(defun gpt-commit--stream-insert-response (response info)
+  "Insert and format RESPONSE text at a marker.
+
+Argument RESPONSE is a string containing the server's response.
+
+Argument INFO is a property list containing the insertion position and tracking
+information."
+  (let ((start-marker (plist-get info :position))
+        (tracking-marker (plist-get info :tracking-marker))
+        (inhibit-modification-hooks t))
+    (when (and response
+               (not (string-empty-p response)))
+      (with-current-buffer (marker-buffer start-marker)
+        (save-excursion
+          (unless tracking-marker
+            (goto-char start-marker)
+            (let ((msg (buffer-substring-no-properties (line-beginning-position)
+                                                       (point))))
+              (cond ((string-prefix-p msg response)
+                     (setq response (substring response (length msg))))
+                    ((string-prefix-p msg (concat response " "))
+                     (setq response (substring response (1+ (length msg)))))
+                    ((string-prefix-p response msg)
+                     (delete-char (- (- (length msg)
+                                        (length response))))
+                     (setq response ""))))
+            (setq tracking-marker (set-marker (make-marker) (point)))
+            (set-marker-insertion-type tracking-marker t)
+            (plist-put info :tracking-marker tracking-marker))
+          (put-text-property 0 (length response) 'gpt-commit 'response
+                             response)
+          (goto-char tracking-marker)
+          (insert
+           response))))))
+
+(defun gpt-commit--abort-by-marker (marker)
+  "Restore text properties and clean up after aborting a request.
+
+Argument MARKER is a marker object indicating the position in the buffer where
+the text properties should be restored."
+  (let ((buff
+         (when (markerp marker)
+           (marker-buffer marker))))
+    (when (buffer-live-p buff)
+      (with-current-buffer buff
+        (save-excursion
+          (gpt-commit-goto-char marker)
+          (gpt-commit-restore-text-props))))
+    (when-let ((cell (rassq marker gpt-commit--request-url-buffers)))
+      (setcdr cell nil))))
+
+(defun gpt-commit-after-change-hook (info)
+  "Parse and insert GPT-generated Emacs Lisp documentation.
+
+Argument INFO is a property list containing various request-related data."
+  (let ((request-buffer (plist-get info :request-buffer))
+        (request-marker (plist-get info :request-marker))
+        (buffer (plist-get info :buffer))
+        (callback (plist-get info :callback)))
+    (when request-buffer
+      (with-current-buffer request-buffer
+        (when (and (boundp 'url-http-end-of-headers)
+                   url-http-end-of-headers)
+          (save-match-data
+            (save-excursion
+              (if request-marker
+                  (goto-char request-marker)
+                (goto-char url-http-end-of-headers)
+                (setq request-marker (point-marker))
+                (plist-put info :request-marker request-marker))
+              (unless (eolp)
+                (beginning-of-line))
+              (let ((errored nil))
+                (when gpt-commit-debug
+                  (setq gpt-commit--debug-data-raw
+                        (append gpt-commit--debug-data-raw
+                                (list
+                                 (list
+                                  (buffer-substring-no-properties
+                                   (point-min)
+                                   (point-max))
+                                  (point))))))
+                (while (and (not errored)
+                            (search-forward "data: " nil t))
+                  (let* ((line
+                          (buffer-substring-no-properties
+                           (point)
+                           (line-end-position))))
+                    (if (string= line "[DONE]")
+                        (progn
+                          (when (and (not (plist-get info :done))
+                                     (buffer-live-p buffer))
+                            (plist-put info :done t)
+                            (let ((tracking-marker
+                                   (plist-get info
+                                              :tracking-marker))
+                                  (final-callback
+                                   (plist-get info
+                                              :final-callback)))
+                              (with-current-buffer buffer
+                                (save-excursion
+                                  (when tracking-marker
+                                    (goto-char tracking-marker))
+                                  (when final-callback
+                                    (funcall
+                                     final-callback))
+                                  (gpt-commit-remove-text-props))
+                                (setq gpt-commit--request-url-buffers
+                                      (assq-delete-all
+                                       (plist-get info :request-buffer)
+                                       gpt-commit--request-url-buffers))
+                                (when (symbol-value 'gpt-commit-abort-mode)
+                                  (gpt-commit-abort-mode -1)))))
+                          (set-marker
+                           request-marker
+                           (point)))
+                      (condition-case _err
+                          (let* ((data (gpt-commit--json-parse-string
+                                        line 'plist))
+                                 (err (plist-get data :error)))
+                            (end-of-line)
+                            (set-marker
+                             request-marker
+                             (point))
+                            (if err
+                                (progn
+                                  (setq errored t)
+                                  (when err
+                                    (message "gpt-commit-error: %s"
+                                             (or
+                                              (plist-get err
+                                                         :message)
+                                              err))))
+                              (when callback
+                                (funcall
+                                 callback
+                                 data))))
+                        (error
+                         (setq errored t)
+                         (goto-char
+                          request-marker))))))))))))))
+
+
+(defun gpt-commit-stream-request (system-prompt user-prompt &optional
+                                                final-callback buffer position)
+  "Send GPT stream request with USER-PROMPT and SYSTEM-PROMPT.
+
+Argument SYSTEM-PROMPT is a string representing the system's part of the
+conversation.
+
+Argument USER-PROMPT is a string representing the user's part of the
+conversation.
+
+Optional argument FINAL-CALLBACK is a function to be called when the request is
+completed.
+
+Optional argument BUFFER is the buffer where the output should be inserted. It
+defaults to the current buffer.
+
+Optional argument POSITION is the position in the BUFFER where the output should
+be inserted. It can be a marker, an integer, or nil. If nil, the current point
+or region end is used."
   (let* ((buffer (or buffer (current-buffer)))
          (start-marker
-          (cond ((null position)
-                 (if (use-region-p)
-                     (set-marker (make-marker)
-                                 (region-end))
-                   (point-marker)))
+          (cond ((not position)
+                 (point-marker))
                 ((markerp position) position)
                 ((integerp position)
                  (set-marker (make-marker) position buffer))))
-         (request-data `(:model ,gpt-commit-model
-                                :messages [(:role "system"
-                                                  :content ,system-prompt)
-                                           (:role "user"
-                                                  :content ,user-prompt)]
-                                :stream t
-                                :temperature ,gpt-commit-gpt-temperature))
-         (token (md5 (format "%s%s%s%s" (random)
-                             (emacs-pid)
-                             (user-full-name)
-                             (recent-keys))))
-         (args (gpt-commit--get-curl-stream-args request-data token))
-         (process
-          (apply #'start-process "gpt-commit-curl"
-                 (generate-new-buffer "*gpt-commit-curl*") "curl" args))
          (info (list
                 :buffer buffer
-                :token token
-                :position start-marker
-                :callback
-                #'gpt-commit--stream-insert-response)))
+                :final-callback final-callback
+                :position start-marker))
+         (url-request-extra-headers `(("Authorization" .
+                                       ,(encode-coding-string
+                                         (string-join
+                                          `("Bearer"
+                                            ,(gpt-commit-get-api-key))
+                                          " ")
+                                         'utf-8))
+                                      ("Content-Type" . "application/json")))
+         (url-request-method "POST")
+         (url-request-data (encode-coding-string
+                            (json-encode
+                             (list
+                              :messages
+                              (apply #'vector `((:role "system"
+                                                 :content ,(or system-prompt ""))
+                                                (:role "user"
+                                                 :content ,user-prompt)))
+                              :model gpt-commit-gpt-model
+                              :temperature gpt-commit-gpt-temperature
+                              :stream t))
+                            'utf-8))
+         (request-buffer)
+         (callback
+          (lambda (response)
+            (let ((err (plist-get response :error)))
+              (if err
+                  (progn
+                    (message "gpt-commit-callback err %s"
+                             (or
+                              (plist-get err
+                                         :message)
+                              err))
+                    (when (buffer-live-p buffer)
+                      (let ((start-marker
+                             (plist-get info
+                                        :position)))
+                        (gpt-commit--abort-by-marker start-marker))))
+                (when (buffer-live-p buffer)
+                  (with-current-buffer buffer
+                    (gpt-commit--stream-insert-response
+                     (gpt-commit--get-response-content
+                      response)
+                     info))))))))
+    (plist-put info :callback callback)
+    (setq request-buffer
+          (url-retrieve
+           gpt-commit-gpt-url
+           (lambda (status &rest _events)
+             (let* ((buff (current-buffer))
+                    (err
+                     (gpt-commit--retrieve-error status)))
+               (if (not err)
+                   (when (symbol-value 'gpt-commit-abort-mode)
+                     (gpt-commit-abort-mode -1))
+                 (run-with-timer 0.5 nil #'gpt-commit--abort-by-url-buffer buff)
+                 (message err))))))
+    (plist-put info :request-buffer request-buffer)
+    (push (cons request-buffer start-marker)
+          gpt-commit--request-url-buffers)
     (with-current-buffer buffer
-      (add-hook 'kill-buffer-hook #'gpt-commit--stream-abort-current-buffer nil
-                t))
-    (with-current-buffer (process-buffer process)
-      (set-process-query-on-exit-flag process nil)
-      (setf (alist-get process gpt-commit--process-alist) info)
-      (set-process-sentinel process #'gpt-commit--stream-sentinel)
-      (set-process-filter process #'gpt-commit--stream-filter))))
-;;
+      (gpt-commit-abort-mode 1)
+      (add-hook 'kill-buffer-hook #'gpt-commit-abort-current-buffer nil t))
+    (with-current-buffer request-buffer
+      (add-hook 'after-change-functions
+                (lambda (&rest _)
+                  (gpt-commit-after-change-hook info))
+                nil t))))
+
+(defvar-local gpt-commit--bus nil)
+
+(defun gpt-commit-command-watcher ()
+  "Monitor `keyboard-quit' commands and handle GPT documentation aborts."
+  (cond ((and gpt-commit--request-url-buffers
+              (eq this-command 'keyboard-quit))
+         (push this-command gpt-commit--bus)
+         (let ((len (length gpt-commit--bus)))
+           (cond ((>= len gpt-commit-abort-on-keyboard-quit-count)
+                  (message  "gpt-commit: Aborting")
+                  (setq gpt-commit--bus nil)
+                  (gpt-commit-abort-all))
+                 ((< len gpt-commit-abort-on-keyboard-quit-count)
+                  (message nil)
+                  (message
+                   (substitute-command-keys
+                    "gpt-commit: Press `\\[keyboard-quit]' %d more times to force interruption.")
+                   (- gpt-commit-abort-on-keyboard-quit-count len))))))
+        (gpt-commit--bus (setq gpt-commit--bus nil))))
+
+(define-minor-mode gpt-commit-abort-mode
+  "Toggle monitoring `keyboard-quit' commands for aborting GPT requests.
+
+Enable `gpt-commit-abort-mode' to monitor and handle `keyboard-quit'
+commands for aborting GPT documentation requests.
+
+When active, pressing `\\[keyboard-quit]' multiple times can trigger the
+cancellation of ongoing documentation generation processes.
+
+See also custom variable `gpt-commit-abort-on-keyboard-quit-count' for
+exact number of `keyboard-quit' presses to abort."
+  :lighter " gpt-commit"
+  :global nil
+  (remove-hook 'pre-command-hook #'gpt-commit-command-watcher 'local)
+  (if (not gpt-commit-abort-mode)
+      (message (setq gpt-commit--bus nil))
+    (add-hook 'pre-command-hook #'gpt-commit-command-watcher nil 'local)
+    (message
+     (substitute-command-keys
+      "gpt-commit: Press `\\[keyboard-quit]' %d more times to force interruption.")
+     gpt-commit-abort-on-keyboard-quit-count)))
 
 (defvar url-http-end-of-headers)
 
@@ -669,7 +1058,9 @@ will be called when the request is completed."
          (user-prompt (format "%s\n\ngit diff output:\n```%s```"
                               msg changes))
          (messages `[((role . "system")
-                      (content . ,gpt-commit-system-prompt-en))
+                      (content . ,(or (nth gpt-commit-curr-prompt-idx
+                                       gpt-commit-system-prompts)
+                                   gpt-commit-system-prompt-en)))
                      ((role . "user")
                       (content . ,user-prompt))]))
     (gpt-commit--run-with-fallback messages callback buffer)))
@@ -871,31 +1262,13 @@ Argument NEW-TYPE is a string representing the new commit type to be applied."
       (forward-line -1))
     (line-end-position)))
 
-(defun gpt-commit--stream-abort (buff)
-  "Abort the associated with the buffer BUFF stream processes.
-
-Argument BUFF is the buffer associated with the process to be aborted."
-  (dolist (proc-attrs gpt-commit--process-alist)
-    (when (eq (plist-get (cdr proc-attrs) :buffer) buff)
-      (when-let ((proc (car proc-attrs)))
-        (setf (alist-get proc gpt-commit--process-alist nil 'remove) nil)
-        (set-process-sentinel proc #'ignore)
-        (delete-process proc)
-        (kill-buffer (process-buffer proc))
-        (message "gpt-doc: Aborted request in buffer %S" (buffer-name buff))))))
-
-(defun gpt-commit--stream-abort-current-buffer ()
-  "Abort stream processes in current buffer."
-  (gpt-commit--stream-abort (current-buffer)))
-
-
 ;;;###autoload
 (defun gpt-commit-stream-abort (buff)
   "Abort stream processes associated with a buffer BUFF.
 
 Argument BUFF is the buffer associated with the process to be aborted."
   (interactive (list (current-buffer)))
-  (gpt-commit--stream-abort buff))
+  (gpt-commit--abort-by-url-buffer buff))
 
 ;;;###autoload
 (defun gpt-commit-improve-message ()
@@ -961,7 +1334,6 @@ Before using, set OpenAI API key
              (when (looking-at "\n[^\n#]")
                (insert "\n")))))))))
 
-
 ;;;###autoload
 (defun gpt-commit-message ()
   "Generate and insert a commit message using GPT.
@@ -988,7 +1360,8 @@ and GPT model `gpt-commit-model'."
     (goto-char (gpt-commit-get-commit-msg-end))
     (if gpt-commit-use-stream
         (gpt-commit-stream-request
-         gpt-commit-system-prompt-en
+         (or (nth gpt-commit-curr-prompt-idx gpt-commit-system-prompts)
+             gpt-commit-system-prompt-en)
          (format "%s\n\ngit diff output:\n%s"
                  msg
                  (gpt-commit-call-process
@@ -1003,14 +1376,88 @@ and GPT model `gpt-commit-model'."
                                     (point)
                                     (lambda () commit-message))))))))
 
+
+
+(defun gpt-commit--index-switcher (step current-index switch-list)
+  "Increase or decrease CURRENT-INDEX depending on STEP value and SWITCH-LIST."
+  (cond ((> step 0)
+         (if (>= (+ step current-index)
+                 (length switch-list))
+             0
+           (+ step current-index)))
+        ((< step 0)
+         (if (or (<= 0 (+ step current-index)))
+             (+ step current-index)
+           (1- (length switch-list))))))
+
 ;;;###autoload (autoload 'gpt-commit-menu "gpt-commit" nil t)
 (transient-define-prefix gpt-commit-menu ()
   "Activate a menu for Git commit operations."
-  ["Cycle"
-   :if (lambda ()
-         (bound-and-true-p git-commit-mode))
-   ("p" "Previous message" git-commit-prev-message :transient t)
-   ("n" "Next message" git-commit-next-message :transient t)]
+  :refresh-suffixes t
+  [:description (lambda ()
+                  (with-temp-buffer
+                    (insert (nth gpt-commit-curr-prompt-idx
+                                 gpt-commit-system-prompts))
+                    (fill-region (point-min)
+                                 (point-max))
+                    (buffer-string)))
+   ("p" "Previous system prompt"
+    (lambda ()
+      (interactive)
+      (setq gpt-commit-curr-prompt-idx
+            (gpt-commit--index-switcher -1
+                                        gpt-commit-curr-prompt-idx
+                                        gpt-commit-system-prompts)))
+    :transient t)
+   ("n" "Next system prompt"
+    (lambda ()
+      (interactive)
+      (setq gpt-commit-curr-prompt-idx
+            (gpt-commit--index-switcher 1
+                                        gpt-commit-curr-prompt-idx
+                                        gpt-commit-system-prompts)))
+    :transient t)
+   ("SPC" "Add system prompt"
+    (lambda ()
+      (interactive)
+      (string-edit
+       "New system prompt: "
+       ""
+       (lambda (edited)
+         (add-to-list 'gpt-commit-system-prompts edited)
+         (when-let ((idx (seq-position gpt-commit-system-prompts edited)))
+           (setq gpt-commit-curr-prompt-idx idx))
+         (transient-setup 'gpt-commit-menu))
+       :abort-callback (lambda ())))
+    :transient nil)
+   ("e" "Edit system prompt"
+    (lambda ()
+      (interactive)
+      (string-edit
+       "Edit system prompt: "
+       (nth gpt-commit-curr-prompt-idx
+            gpt-commit-system-prompts)
+       (lambda (edited)
+         (setf (nth gpt-commit-curr-prompt-idx gpt-commit-system-prompts)
+               edited)
+         (transient-setup 'gpt-commit-menu))
+       :abort-callback (lambda ())))
+    :transient nil)
+   ("D" "Delete current system prompt"
+    (lambda ()
+      (interactive)
+      (setq gpt-commit-system-prompts
+            (remove (nth gpt-commit-curr-prompt-idx gpt-commit-system-prompts)
+                    gpt-commit-system-prompts)))
+    :transient t)
+   ("C-x C-w" "Save prompts"
+    (lambda ()
+      (interactive)
+      (customize-save-variable
+       'gpt-commit-system-prompts
+       gpt-commit-system-prompts))
+    :transient t)
+   ("c" "GPT Commit" gpt-commit-message)]
   ["Commit Type"
    ("t" gpt-commit-toggle-commit-type
     :description (lambda ()
@@ -1026,7 +1473,7 @@ and GPT model `gpt-commit-model'."
                                       'transient-inactive-value)))
                       gpt-commit-types-alist
                       (propertize "|" 'face 'transient-inactive-value)))))
-   ("o" gpt-commit-update-commit-type
+   ("u" gpt-commit-update-commit-type
     :description (lambda ()
                    (or
                     (when-let* ((current
@@ -1045,7 +1492,6 @@ and GPT model `gpt-commit-model'."
                                     cell)))
                        " "))
                     "None")))
-   ("c" "GPT Commit" gpt-commit-message)
    ("f" "GPT improve" gpt-commit-improve-message
     :inapt-if-not gpt-commit-buffer-message)]
   ["Issue Key"
@@ -1056,25 +1502,26 @@ and GPT model `gpt-commit-model'."
                            (or (gpt-commit-retrieve-issue-key-from-branch)
                                "None")
                            ")")))]
-  ["Insert"
+  ["Git commit"
    :if (lambda ()
          (bound-and-true-p git-commit-mode))
-   ("a" "Ack" git-commit-ack)
-   ("O" "Sign-Off" git-commit-signoff)
-   ("b" "Modified-by" git-commit-modified)
-   ("T" "Tested-by" git-commit-test)
-   ("r" "Reviewed-by" git-commit-review)
-   ("C" "CC (mentioning someone)" git-commit-cc)
-   ("e" "Reported" git-commit-reported)
-   ("s" "Suggested" git-commit-suggested)
-   ("-" "Co-authored-by" git-commit-co-authored)
-   ("d" "Co-developed-by" git-commit-co-developed)]
-  ["Do"
-   :if (lambda ()
-         (bound-and-true-p git-commit-mode))
-   ("v" "Save" git-commit-save-message)
-   ("l" "Cancel" with-editor-cancel)
-   ("m" "Commit" with-editor-finish)])
+   ("M-p" "Previous message" git-commit-prev-message
+    :transient t
+    :if (lambda ()
+          (bound-and-true-p git-commit-mode)))
+   ("M-n" "Next message" git-commit-next-message
+    :transient t
+    :if (lambda ()
+          (bound-and-true-p git-commit-mode)))
+   ("T" "Insert a commit message trailer" git-commit-insert-trailer)
+   ("S" "Save" git-commit-save-message)
+   ("L" "Cancel" with-editor-cancel)
+   ("F" "Commit" with-editor-finish)]
+  (interactive)
+  (add-to-list 'gpt-commit-system-prompts gpt-commit-system-prompt-en)
+  (when (not (nth gpt-commit-curr-prompt-idx gpt-commit-system-prompts))
+    (setq gpt-commit-curr-prompt-idx 0))
+  (transient-setup #'gpt-commit-menu))
 
 (provide 'gpt-commit)
 ;;; gpt-commit.el ends here
