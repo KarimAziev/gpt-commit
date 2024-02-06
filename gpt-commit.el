@@ -355,11 +355,6 @@ key (more secure)."
   :group 'gpt-commit
   :type 'string)
 
-(defcustom gpt-commit-gpt-model "gpt-4-1106-preview"
-  "A string variable representing the API model for OpenAI."
-  :group 'gpt-commit
-  :type 'string)
-
 (defcustom gpt-commit-gpt-temperature 0.1
   "The temperature for the OpenAI GPT model used.
 
@@ -800,7 +795,7 @@ or region end is used."
                                                  :content ,(or system-prompt ""))
                                                 (:role "user"
                                                  :content ,user-prompt)))
-                              :model gpt-commit-gpt-model
+                              :model gpt-commit-model
                               :temperature gpt-commit-gpt-temperature
                               :stream t))
                             'utf-8))
