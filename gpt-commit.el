@@ -141,7 +141,7 @@ needed."
   :type 'boolean)
 
 
-(defcustom gpt-commit-system-prompt-en "Based on the user-supplied incomplete or empty commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message accurately encompassing the changes. Ensure that your response strictly contains the refined commit message, without including any extraneous information. Fill text lines to be no longer than 70, don't wrap in any quotes."
+(defcustom gpt-commit-system-prompt-en "Based on the user-supplied incomplete or empty commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message emphasizing the most important changes or features first. Ensure that your response strictly contains the refined commit message, without including any extraneous information. Fill text lines to be no longer than 70, don't wrap in any quotes."
   "Prompt (directive) for GPT-commit to generate commit message."
   :type 'string
   :group 'gpt-commit)
@@ -152,7 +152,7 @@ needed."
   :group 'gpt-commit)
 
 
-(defcustom gpt-commit-system-prompts '("Based on the user-supplied incomplete or empty commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message accurately encompassing the changes. Ensure that your response strictly contains the refined commit message, without including any extraneous information. Fill text lines to be no longer than 70, don't wrap in any quotes."
+(defcustom gpt-commit-system-prompts '("Based on the user-supplied incomplete or empty commit message and the output from `git diff --cached`, your task is to generate a completed, conventional commit message emphasizing the most important changes or features first. Ensure that your response strictly contains the refined commit message, without including any extraneous information. Fill text lines to be no longer than 70, don't wrap in any quotes."
                                        "Using the output from `git diff --cached` and any user-provided partial commit message, your task is to create a concise commit summary starting with a scope (e.g., feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert). The summary should not exceed 70 characters and must encapsulate the primary change or intent of the commit succinctly. Don't wrap summary in any quotes. Provide only the summary, excluding any additional information or detailed description. ")
   "List of strings for GPT-based commit message generation.
 
@@ -1204,7 +1204,7 @@ will be called when the request is completed."
   "Update commit message with a new commit type.
 
 Argument NEW-TYPE is a string representing the new commit type to be applied."
-  
+
   (interactive (list (gpt-commit-read-type)))
   (let ((msg (gpt-commit-buffer-message))
         (type-re (concat "^" (regexp-opt (mapcar #'car
