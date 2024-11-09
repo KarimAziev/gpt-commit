@@ -569,7 +569,7 @@ Argument STATUS is a plist containing the status of the HTTP request."
                            'url-http-end-of-headers)
                           url-http-end-of-headers)
                  (goto-char url-http-end-of-headers))
-               (when-let ((err (ignore-errors
+               (when-let* ((err (ignore-errors
                                  (cdr-safe
                                   (assq 'error
                                         (gpt-commit-json-read-buffer
@@ -653,7 +653,7 @@ the text properties should be restored."
         (save-excursion
           (gpt-commit-goto-char marker)
           (gpt-commit-restore-text-props))))
-    (when-let ((cell (rassq marker gpt-commit--request-url-buffers)))
+    (when-let* ((cell (rassq marker gpt-commit--request-url-buffers)))
       (setcdr cell nil))))
 
 (defun gpt-commit-after-change-hook (info)
@@ -933,7 +933,7 @@ potentially killed."
 
 Argument RESPONSE is a list that represents the response from the GPT commit
 request."
-  (when-let ((err (plist-get response :error)))
+  (when-let* ((err (plist-get response :error)))
     (concat (propertize
              "gpt-commit request error: "
              'face
@@ -941,7 +941,7 @@ request."
             (mapconcat (apply-partially #'format "%s")
                        (delq nil
                              (list (or
-                                    (when-let ((type
+                                    (when-let* ((type
                                                 (ignore-errors
                                                   (cadr
                                                    err))))
@@ -956,7 +956,7 @@ request."
 
 Argument RESPONSE is a list that represents the response from the GPT commit
 request."
-  (when-let ((err (cdr-safe (assq 'error response))))
+  (when-let* ((err (cdr-safe (assq 'error response))))
     (concat (propertize
              "gpt-commit request error: "
              'face
@@ -998,7 +998,7 @@ used."
     (setq gpt-commit-request-buffer
           (url-retrieve gpt-commit-api-url
                         (lambda (status &rest _)
-                          (if-let ((err
+                          (if-let* ((err
                                     (gpt-commit-get-status-error status)))
                               (and error-callback (funcall error-callback err status))
                             (let* ((response
@@ -1117,7 +1117,7 @@ will be called when the request is completed."
 
 (defun gpt-commit-retrieve-issue-key-from-branch ()
   "Retrieve jira issue from STR."
-  (when-let ((branch (gpt-commit-call-process "git" "symbolic-ref" "--short"
+  (when-let* ((branch (gpt-commit-call-process "git" "symbolic-ref" "--short"
                                               "HEAD")))
     (gpt-commit--retrieve-issue-key-from-branch branch)))
 
@@ -1148,7 +1148,7 @@ will be called when the request is completed."
 
 (defun gpt-commit-current-commit-type ()
   "Check and return the current commit type from the git commit message."
-  (when-let ((msg (gpt-commit-buffer-message))
+  (when-let* ((msg (gpt-commit-buffer-message))
              (re (concat "^" (regexp-opt (mapcar #'car
                                                  gpt-commit-types-alist)))))
     (and (string-match-p re msg)
@@ -1168,7 +1168,7 @@ will be called when the request is completed."
   (interactive)
   (let* ((current (gpt-commit-current-commit-type))
          (next
-          (if-let ((cell (assoc-string current gpt-commit-types-alist)))
+          (if-let* ((cell (assoc-string current gpt-commit-types-alist)))
               (caadr (member cell gpt-commit-types-alist))
             (caar gpt-commit-types-alist))))
     (gpt-commit-update-commit-type next)
@@ -1420,7 +1420,7 @@ and GPT model `gpt-commit-model'."
        ""
        (lambda (edited)
          (add-to-list 'gpt-commit-system-prompts edited)
-         (when-let ((idx (seq-position gpt-commit-system-prompts edited)))
+         (when-let* ((idx (seq-position gpt-commit-system-prompts edited)))
            (setq gpt-commit-curr-prompt-idx idx))
          (transient-setup 'gpt-commit-menu))
        :abort-callback (lambda ())))
